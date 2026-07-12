@@ -1,0 +1,24 @@
+{
+  "name": "wsp-isap-rpa",
+  "version": "0.1.0",
+  "description": "Workers RPA con Playwright para automatizar reembolsos en sucursales virtuales de Isapres",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test:colmena": "tsx src/scrapers/colmena.ts",
+    "test:banmedica": "tsx src/scrapers/banmedica.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "playwright": "^1.49.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
