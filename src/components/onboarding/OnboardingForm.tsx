@@ -26,7 +26,7 @@ interface OnboardingFormProps {
 
 /**
  * Formulario de Onboarding seguro para enrolar usuarios desde WhatsApp.
- *
+ *se
  * Campos:
  * - Nombre
  * - Teléfono (ID de WhatsApp)
