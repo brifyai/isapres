@@ -14,6 +14,12 @@ const registerSchema = z.object({
   nombre: z.string().min(3, 'El nombre debe tener al menos 3 caracteres'),
   telefono: z.string().min(9, 'Teléfono inválido'),
   rut: z.string().min(8, 'RUT inválido'),
+  acceptedPrivacyPolicy: z.literal(true, {
+    errorMap: () => ({ message: 'Debes aceptar la política de privacidad' }),
+  }),
+  acceptedTerms: z.literal(true, {
+    errorMap: () => ({ message: 'Debes aceptar los términos y condiciones' }),
+  }),
   credenciales: z.object({
     isapreId: z.enum([
       'colmena', 'banmedica', 'consalud', 'cruzblanca',
@@ -53,11 +59,27 @@ router.post('/register', asyncHandler(async (req, res) => {
     const usuario = await withTransaction(async (client) => {
       const insertUser = await client.query<Usuario>(
         `
-          INSERT INTO usuarios (nombre, telefono, rut, password_hash)
-          VALUES ($1, $2, $3, $4)
+          INSERT INTO usuarios (
+            nombre,
+            telefono,
+            rut,
+            password_hash,
+            accepted_privacy_policy_at,
+            accepted_terms_at,
+            consent_ip,
+            consent_user_agent
+          )
+          VALUES ($1, $2, $3, $4, timezone('utc', now()), timezone('utc', now()), $5, $6)
           RETURNING id, nombre, telefono, rut, created_at, updated_at
         `,
-        [body.nombre, body.telefono, body.rut, passwordHash],
+        [
+          body.nombre,
+          body.telefono,
+          body.rut,
+          passwordHash,
+          req.ip ?? null,
+          req.get('user-agent') ?? null,
+        ],
       )
 
       const createdUser = insertUser.rows[0]

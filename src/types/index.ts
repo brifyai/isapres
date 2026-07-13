@@ -145,6 +145,8 @@ export interface RegistroUsuarioPayload {
   telefono: string;
   rut: string;
   credenciales: CredencialesIsapre;
+  acceptedPrivacyPolicy: boolean;
+  acceptedTerms: boolean;
 }
 
 /* ────────────────────── Reembolso ───────────────────────── */

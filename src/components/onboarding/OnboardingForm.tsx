@@ -16,6 +16,8 @@ interface FormErrors {
   isapreId?: string
   isapreRut?: string
   isaprePassword?: string
+  acceptedPrivacyPolicy?: string
+  acceptedTerms?: string
 }
 
 interface OnboardingFormProps {
@@ -26,7 +28,6 @@ interface OnboardingFormProps {
 
 /**
  * Formulario de Onboarding seguro para enrolar usuarios desde WhatsApp.
- *se
  * Campos:
  * - Nombre
  * - Teléfono (ID de WhatsApp)
@@ -48,6 +49,8 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
   const [isapreRut, setIsapreRut] = useState('')
   const [isaprePassword, setIsaprePassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [acceptedPrivacyPolicy, setAcceptedPrivacyPolicy] = useState(false)
+  const [acceptedTerms, setAcceptedTerms] = useState(false)
 
   // ── Estado de UI ──
   const [errors, setErrors] = useState<FormErrors>({})
@@ -90,6 +93,11 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
   const validateIsaprePassword = useCallback((value: string): string | undefined => {
     if (!value) return 'La contraseña es obligatoria'
     if (value.length < 4) return 'La contraseña parece muy corta'
+    return undefined
+  }, [])
+
+  const validateAcceptance = useCallback((accepted: boolean, message: string): string | undefined => {
+    if (!accepted) return message
     return undefined
   }, [])
 
@@ -146,6 +154,14 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
       isapreId: isapreId ? undefined : 'Selecciona tu Isapre',
       isapreRut: validateIsapreRut(isapreRut),
       isaprePassword: validateIsaprePassword(isaprePassword),
+      acceptedPrivacyPolicy: validateAcceptance(
+        acceptedPrivacyPolicy,
+        'Debes aceptar la política de privacidad',
+      ),
+      acceptedTerms: validateAcceptance(
+        acceptedTerms,
+        'Debes aceptar los términos y condiciones',
+      ),
     }
 
     setErrors(newErrors)
@@ -159,11 +175,14 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
     isapreId,
     isapreRut,
     isaprePassword,
+    acceptedPrivacyPolicy,
+    acceptedTerms,
     validateNombre,
     validateTelefono,
     validateRutField,
     validateIsapreRut,
     validateIsaprePassword,
+    validateAcceptance,
   ])
 
   // ── Submit ──
@@ -181,6 +200,8 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
         nombre: nombre.trim(),
         telefono: telefono.replace(/\D/g, ''),
         rut: rut.trim(),
+        acceptedPrivacyPolicy,
+        acceptedTerms,
         credenciales: {
           isapreId: isapreId as IsapreId,
           rut: isapreRut.trim(),
@@ -335,6 +356,80 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
             </button>
           }
         />
+      </div>
+
+      <div className="rounded-2xl border border-border/70 bg-secondary/20 p-4">
+        <div className="space-y-3">
+          <label className="flex items-start gap-3 text-sm text-foreground">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+              checked={acceptedPrivacyPolicy}
+              onChange={(e) => {
+                setAcceptedPrivacyPolicy(e.target.checked)
+                if (errors.acceptedPrivacyPolicy) {
+                  setErrors((prev) => ({
+                    ...prev,
+                    acceptedPrivacyPolicy: validateAcceptance(
+                      e.target.checked,
+                      'Debes aceptar la política de privacidad',
+                    ),
+                  }))
+                }
+              }}
+            />
+            <span>
+              He leído y acepto la{' '}
+              <a
+                href="/politica-de-privacidad"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-primary underline underline-offset-4"
+              >
+                Política de Privacidad
+              </a>{' '}
+              para el tratamiento de mis datos personales, credenciales y trazabilidad del proceso.
+            </span>
+          </label>
+          {errors.acceptedPrivacyPolicy && (
+            <p className="text-sm text-destructive">{errors.acceptedPrivacyPolicy}</p>
+          )}
+
+          <label className="flex items-start gap-3 text-sm text-foreground">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+              checked={acceptedTerms}
+              onChange={(e) => {
+                setAcceptedTerms(e.target.checked)
+                if (errors.acceptedTerms) {
+                  setErrors((prev) => ({
+                    ...prev,
+                    acceptedTerms: validateAcceptance(
+                      e.target.checked,
+                      'Debes aceptar los términos y condiciones',
+                    ),
+                  }))
+                }
+              }}
+            />
+            <span>
+              Acepto los{' '}
+              <a
+                href="/terminos-y-condiciones"
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-primary underline underline-offset-4"
+              >
+                Términos y Condiciones
+              </a>{' '}
+              del servicio de automatización de reembolsos vía WhatsApp.
+            </span>
+          </label>
+          {errors.acceptedTerms && (
+            <p className="text-sm text-destructive">{errors.acceptedTerms}</p>
+          )}
+        </div>
       </div>
 
       {/* ── Error de submit ── */}

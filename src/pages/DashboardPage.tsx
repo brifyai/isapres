@@ -213,6 +213,20 @@ export function DashboardPage() {
               <RefreshCw className="h-4 w-4" />
               Actualizar
             </Button>
+            <Button
+              variant="outline"
+              onClick={() => window.open('/politica-de-privacidad', '_blank', 'noopener,noreferrer')}
+            >
+              <ShieldCheck className="h-4 w-4" />
+              Política de Privacidad
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => window.open('/terminos-y-condiciones', '_blank', 'noopener,noreferrer')}
+            >
+              <FileText className="h-4 w-4" />
+              Términos
+            </Button>
             <Button onClick={handleOpenWhatsapp}>
               <MessageCircle className="h-4 w-4" />
               Abrir WhatsApp

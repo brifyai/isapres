@@ -2,6 +2,8 @@ import { AuthProvider } from '@/context/AuthContext'
 import { useAuth } from '@/context/AuthContext'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { OnboardingPage } from '@/pages/OnboardingPage'
+import { PrivacyPolicyPage } from '@/pages/PrivacyPolicyPage'
+import { TermsPage } from '@/pages/TermsPage'
 
 /**
  * Componente raíz de la aplicación.
@@ -12,6 +14,15 @@ import { OnboardingPage } from '@/pages/OnboardingPage'
  */
 function AppShell() {
   const { isAuthenticated, isLoading } = useAuth()
+  const pathname = window.location.pathname.toLowerCase()
+
+  if (pathname === '/politica-de-privacidad') {
+    return <PrivacyPolicyPage />
+  }
+
+  if (pathname === '/terminos-y-condiciones') {
+    return <TermsPage />
+  }
 
   if (isLoading) {
     return (

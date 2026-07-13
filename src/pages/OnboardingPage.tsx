@@ -49,10 +49,28 @@ export function OnboardingPage() {
         </main>
 
         {/* Footer */}
-        <footer className="mt-6 text-center">
+        <footer className="mt-6 flex flex-col items-center gap-3 text-center">
           <p className="text-xs text-muted-foreground">
-            🔒 Tus datos están protegidos con cifrado AES-256
+            Tus datos están protegidos con cifrado AES-256
           </p>
+          <div className="flex flex-wrap items-center justify-center gap-3 text-xs">
+            <a
+              href="/politica-de-privacidad"
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-primary underline underline-offset-4"
+            >
+              Política de Privacidad
+            </a>
+            <a
+              href="/terminos-y-condiciones"
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-primary underline underline-offset-4"
+            >
+              Términos y Condiciones
+            </a>
+          </div>
         </footer>
       </div>
     </div>
