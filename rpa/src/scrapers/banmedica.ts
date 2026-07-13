@@ -11,7 +11,7 @@ const banmedicaConfig: ScraperConfig = {
   isapreId: 'banmedica',
   nombre: 'Banmedica',
   urlLogin: 'https://login.isaprebanmedica.cl/login',
-  urlReembolso: 'https://login.isaprebanmedica.cl/login',
+  urlReembolso: 'https://afiliados.isaprebanmedica.cl/view/reembolso',
   selectores: {
     inputRut: '#rut',
     inputPassword: '#current-password',
@@ -46,6 +46,7 @@ export class BanmedicaScraper extends BaseScraper {
       await this.page.fill('#current-password', credenciales.password)
       await this.page.locator('button[type="submit"]').first().click()
 
+      await this.page.waitForURL(/\/view\/(home|reembolso)/, { timeout: 20000 }).catch(() => undefined)
       await this.page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => undefined)
       await this.page.waitForTimeout(3000)
 
@@ -147,20 +148,45 @@ export class BanmedicaScraper extends BaseScraper {
       throw new Error('Pagina no inicializada')
     }
 
-    await this.page.waitForTimeout(2000)
-    await this.safeClick([
-      'a.item-link:has-text("Reembolsos")',
-      'text=Reembolsos',
-    ], 'Abrir menu Reembolsos', ctx)
-
-    await this.safeClick([
-      'a:has-text("Solicitar Reembolso")',
-      'text=Solicitar Reembolso',
-    ], 'Ingresar a Solicitar Reembolso', ctx)
-
+    await this.page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => undefined)
     await this.page.waitForTimeout(2000)
 
+    if (!this.page.url().includes('/view/reembolso')) {
+      const menuOpened = await this.openReembolsosMenu(ctx)
+      if (menuOpened) {
+        const navigatedFromMenu = await this.safeClick([
+          'ul.list-link a:has-text("Solicitar Reembolso")',
+          'li.link-item a:has-text("Solicitar Reembolso")',
+          'a:has-text("Solicitar Reembolso")',
+          'text=Solicitar Reembolso',
+        ], 'Ingresar a Solicitar Reembolso', ctx, true)
+
+        if (navigatedFromMenu) {
+          await this.page.waitForURL(/\/view\/reembolso/, { timeout: 15000 }).catch(() => undefined)
+        }
+      }
+    }
+
+    if (!this.page.url().includes('/view/reembolso')) {
+      await this.page.goto(this.config.urlReembolso, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined)
+      await ctx.recordStep({
+        etapa: 'navegacion',
+        accion: 'goto',
+        detalle: 'Ingreso directo a Solicitar Reembolso por URL autenticada',
+        url: this.page.url(),
+        status: 'warning',
+        payload: {
+          fallback: true,
+        },
+      })
+    }
+
+    await this.page.waitForURL(/\/view\/reembolso/, { timeout: 15000 })
+    await this.page.waitForTimeout(2000)
+
     await this.safeClick([
+      '.id-carrusel .card.shadow-sm',
       '.id-carrusel .card',
       '.id-carrusel swiper-slide',
       '.id-carrusel [role="group"]',
@@ -171,6 +197,57 @@ export class BanmedicaScraper extends BaseScraper {
       'text=Urgencias Medicas',
       '.option-box:has-text("Urgencias Médicas")',
     ], 'Elegir prestacion Urgencias Medicas', ctx)
+  }
+
+  private async openReembolsosMenu(ctx: DemoExecutionContext): Promise<boolean> {
+    if (!this.page) {
+      return false
+    }
+
+    const selectors = [
+      'ul.items a.item-link.drop:has-text("Reembolsos")',
+      'a.item-link.drop:has-text("Reembolsos")',
+      'a.item-link:has-text("Reembolsos")',
+      'a:has-text("Reembolsos")',
+      'text=Reembolsos',
+    ]
+
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first()
+
+      try {
+        await locator.waitFor({ state: 'visible', timeout: 3000 })
+      } catch {
+        continue
+      }
+
+      await locator.scrollIntoViewIfNeeded().catch(() => undefined)
+      await locator.hover({ timeout: 5000 }).catch(() => undefined)
+      await this.page.waitForTimeout(800)
+
+      const submenuVisible = await this.page.locator('ul.list-link a:has-text("Solicitar Reembolso")').first().isVisible().catch(() => false)
+      if (!submenuVisible) {
+        await locator.click({ timeout: 5000 }).catch(async () => {
+          await locator.click({ force: true, timeout: 5000 })
+        })
+        await this.page.waitForTimeout(1200)
+      }
+
+      const submenuReady = await this.page.locator('ul.list-link a:has-text("Solicitar Reembolso")').first().isVisible().catch(() => false)
+      if (submenuReady) {
+        await ctx.recordStep({
+          etapa: 'navegacion',
+          accion: 'click',
+          detalle: 'Abrir menu Reembolsos',
+          selector,
+          url: this.page.url(),
+          status: 'success',
+        })
+        return true
+      }
+    }
+
+    return false
   }
 
   private async safeClick(
@@ -185,22 +262,27 @@ export class BanmedicaScraper extends BaseScraper {
 
     for (const selector of selectors) {
       const locator = this.page.locator(selector).first()
-      if (await locator.count()) {
-        await locator.click({ timeout: 10000 }).catch(async () => {
-          await locator.click({ force: true, timeout: 10000 })
-        })
-        await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined)
-        await this.page.waitForTimeout(1500)
-        await ctx.recordStep({
-          etapa: 'navegacion',
-          accion: 'click',
-          detalle: detail,
-          selector,
-          url: this.page.url(),
-          status: 'success',
-        })
-        return true
+      try {
+        await locator.waitFor({ state: 'visible', timeout: 3000 })
+      } catch {
+        continue
       }
+
+      await locator.scrollIntoViewIfNeeded().catch(() => undefined)
+      await locator.click({ timeout: 10000 }).catch(async () => {
+        await locator.click({ force: true, timeout: 10000 })
+      })
+      await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined)
+      await this.page.waitForTimeout(1500)
+      await ctx.recordStep({
+        etapa: 'navegacion',
+        accion: 'click',
+        detalle: detail,
+        selector,
+        url: this.page.url(),
+        status: 'success',
+      })
+      return true
     }
 
     if (optional) {
