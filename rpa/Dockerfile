@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.49.1-jammy AS builder
+FROM mcr.microsoft.com/playwright:v1.61.1-jammy AS builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ COPY src ./src
 
 RUN npm run build
 
-FROM mcr.microsoft.com/playwright:v1.49.1-jammy AS runner
+FROM mcr.microsoft.com/playwright:v1.61.1-jammy AS runner
 
 WORKDIR /app
 ENV NODE_ENV=production
