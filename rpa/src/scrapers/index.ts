@@ -1,5 +1,6 @@
 import { BaseScraper } from '../base-scraper.js'
 import type { ScraperConfig, IsapreId } from '../types.js'
+import { BanmedicaScraper } from './banmedica.js'
 
 /**
  * Configuraciones de los 7 scrapers de Isapres.
@@ -29,18 +30,14 @@ const configs: Record<IsapreId, ScraperConfig> = {
   banmedica: {
     isapreId: 'banmedica',
     nombre: 'Banmédica',
-    urlLogin: 'https://www.banmedica.cl/wps/wcm/connect/banmedica/sitio',
-    urlReembolso: 'https://www.banmedica.cl/wps/wcm/connect/banmedica/sitio/beneficiarios/reembolsos',
+    urlLogin: 'https://login.isaprebanmedica.cl/login',
+    urlReembolso: 'https://login.isaprebanmedica.cl/login',
     selectores: {
-      inputRut: '#rut-input',
-      inputPassword: '#clave-input',
-      btnLogin: '#ingresar-btn',
-      loginSuccessIndicator: '.mi-cuenta',
-      loginErrorIndicator: '.mensaje-error',
-      inputBoleta: 'input[type="file"]#archivo-boleta',
-      inputMonto: '#monto',
-      btnEnviar: '#enviar-solicitud',
-      folioResultado: '.numero-folio',
+      inputRut: '#rut',
+      inputPassword: '#current-password',
+      btnLogin: 'button[type="submit"]',
+      loginSuccessIndicator: 'ul.items',
+      loginErrorIndicator: 'small',
     },
   },
 
@@ -139,6 +136,10 @@ const configs: Record<IsapreId, ScraperConfig> = {
  * Factory que retorna el scraper correcto para una Isapre dada.
  */
 export function getScraper(isapreId: IsapreId): BaseScraper {
+  if (isapreId === 'banmedica') {
+    return new BanmedicaScraper()
+  }
+
   const config = configs[isapreId]
   if (!config) {
     throw new Error(`No hay scraper configurado para la Isapre: ${isapreId}`)

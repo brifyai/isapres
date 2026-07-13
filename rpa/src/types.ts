@@ -20,6 +20,7 @@ export type EstadoSolicitud =
   | 'rechazado'
 
 export type PortalStatus = 'operativo' | 'caido' | 'html_cambiado' | 'mantenimiento'
+export type EstadoProcesoDemo = 'pendiente' | 'en_progreso' | 'completado' | 'fallido'
 
 /** Datos que el RPA necesita para procesar un reembolso. */
 export interface ReembolsoTask {
@@ -46,6 +47,45 @@ export interface ResultadoReembolso {
   folioIsapre?: string
   error?: string
   portalStatus?: PortalStatus
+}
+
+export interface ProcesoDemoTask {
+  id: number
+  usuario_id: number
+  telefono: string
+  isapre_id: IsapreId
+  flujo: string
+  estado: EstadoProcesoDemo
+  metadata: {
+    formulario?: Record<string, unknown>
+    [key: string]: unknown
+  }
+  intentos: number
+}
+
+export interface ProcesoCampoRegistro {
+  campoKey: string
+  label: string
+  tipo: string
+  selector?: string
+  requerido?: boolean
+  valorIngresado?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface ProcesoPasoRegistro {
+  etapa: string
+  accion: string
+  detalle?: string
+  url?: string
+  selector?: string
+  status?: 'info' | 'success' | 'warning' | 'error'
+  payload?: Record<string, unknown>
+}
+
+export interface DemoExecutionContext {
+  recordStep: (step: ProcesoPasoRegistro) => Promise<void>
+  upsertField: (field: ProcesoCampoRegistro) => Promise<void>
 }
 
 /** Configuración de un scraper de Isapre. */

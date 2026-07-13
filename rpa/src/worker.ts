@@ -2,7 +2,15 @@ import http from 'node:http'
 import { getScraper } from './scrapers/index.js'
 import { execute, query, queryOne } from './db.js'
 import { decrypt } from './crypto.js'
-import type { ReembolsoTask, CredencialesDescifradas, IsapreId } from './types.js'
+import type {
+  CredencialesDescifradas,
+  IsapreId,
+  ProcesoCampoRegistro,
+  ProcesoDemoTask,
+  ProcesoPasoRegistro,
+  ReembolsoTask,
+} from './types.js'
+import { BanmedicaScraper } from './scrapers/banmedica.js'
 
 const POLL_INTERVAL_MS = 10000 // 10 segundos
 const MAX_INTENTOS = 5
@@ -71,6 +79,36 @@ async function getReembolsosPendientes(): Promise<ReembolsoTask[]> {
   )
 }
 
+async function getProcesosDemoPendientes(): Promise<ProcesoDemoTask[]> {
+  return query<ProcesoDemoTask>(
+    `
+      WITH picked AS (
+        SELECT id
+        FROM procesos_demo
+        WHERE estado = 'pendiente'
+          AND intentos < $1
+          AND (
+            locked_at IS NULL
+            OR locked_at < timezone('utc', now()) - make_interval(mins => $2)
+          )
+        ORDER BY created_at ASC
+        LIMIT 3
+      )
+      UPDATE procesos_demo AS p
+      SET estado = 'en_progreso',
+          intentos = intentos + 1,
+          locked_at = timezone('utc', now()),
+          worker_id = $3,
+          started_at = COALESCE(started_at, timezone('utc', now())),
+          updated_at = timezone('utc', now())
+      FROM picked
+      WHERE p.id = picked.id
+      RETURNING p.id, p.usuario_id, p.telefono, p.isapre_id, p.flujo, p.estado, p.metadata, p.intentos
+    `,
+    [MAX_INTENTOS, LOCK_TIMEOUT_MINUTES, WORKER_ID],
+  )
+}
+
 /**
  * Obtiene las credenciales descifradas del usuario para una Isapre dada.
  */
@@ -131,6 +169,111 @@ async function updateReembolsoEstado(
   )
 }
 
+async function updateProcesoDemoEstado(
+  id: number,
+  estado: 'en_progreso' | 'completado' | 'fallido',
+  opts: { resumen?: string; error?: string },
+): Promise<void> {
+  const releaseLock = estado === 'completado' || estado === 'fallido'
+
+  await execute(
+    `
+      UPDATE procesos_demo
+      SET estado = $1::estado_proceso_demo,
+          resumen = COALESCE($2, resumen),
+          error = $3,
+          locked_at = CASE WHEN $4 THEN NULL ELSE timezone('utc', now()) END,
+          worker_id = CASE WHEN $4 THEN NULL ELSE $5 END,
+          finished_at = CASE WHEN $4 THEN timezone('utc', now()) ELSE finished_at END,
+          updated_at = timezone('utc', now())
+      WHERE id = $6
+    `,
+    [estado, opts.resumen ?? null, opts.error ?? null, releaseLock, WORKER_ID, id],
+  )
+}
+
+async function recordProcesoStep(
+  procesoId: number,
+  step: ProcesoPasoRegistro,
+): Promise<void> {
+  await execute(
+    `
+      INSERT INTO proceso_pasos (
+        proceso_id,
+        orden,
+        etapa,
+        accion,
+        detalle,
+        url,
+        selector,
+        status,
+        payload
+      )
+      SELECT
+        $1,
+        COALESCE(MAX(orden), 0) + 1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8::jsonb
+      FROM proceso_pasos
+      WHERE proceso_id = $1
+    `,
+    [
+      procesoId,
+      step.etapa,
+      step.accion,
+      step.detalle ?? null,
+      step.url ?? null,
+      step.selector ?? null,
+      step.status ?? 'info',
+      JSON.stringify(step.payload ?? {}),
+    ],
+  )
+}
+
+async function upsertProcesoField(
+  procesoId: number,
+  field: ProcesoCampoRegistro,
+): Promise<void> {
+  await execute(
+    `
+      INSERT INTO proceso_campos (
+        proceso_id,
+        campo_key,
+        label,
+        tipo,
+        selector,
+        requerido,
+        valor_ingresado,
+        metadata
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+      ON CONFLICT (proceso_id, campo_key) DO UPDATE SET
+        label = EXCLUDED.label,
+        tipo = EXCLUDED.tipo,
+        selector = COALESCE(EXCLUDED.selector, proceso_campos.selector),
+        requerido = EXCLUDED.requerido,
+        valor_ingresado = COALESCE(EXCLUDED.valor_ingresado, proceso_campos.valor_ingresado),
+        metadata = EXCLUDED.metadata,
+        updated_at = timezone('utc', now())
+    `,
+    [
+      procesoId,
+      field.campoKey,
+      field.label,
+      field.tipo,
+      field.selector ?? null,
+      field.requerido ?? false,
+      field.valorIngresado ?? null,
+      JSON.stringify(field.metadata ?? {}),
+    ],
+  )
+}
+
 /**
  * Procesa un reembolso individual.
  */
@@ -172,6 +315,75 @@ async function procesarReembolso(task: ReembolsoTask): Promise<void> {
     const errorMsg = error instanceof Error ? error.message : 'Error inesperado'
     await updateReembolsoEstado(task.id, 'rechazado', { error: errorMsg })
     console.log(`❌ Reembolso #${task.id}: ${errorMsg}`)
+  }
+}
+
+async function procesarProcesoDemo(task: ProcesoDemoTask): Promise<void> {
+  console.log(`\n━━━ Procesando demo #${task.id} (${task.isapre_id}) ━━━`)
+
+  await recordProcesoStep(task.id, {
+    etapa: 'worker',
+    accion: 'worker_toma_proceso',
+    detalle: `Worker ${WORKER_ID} toma el proceso demo`,
+    status: 'info',
+  })
+
+  const credenciales = await getCredenciales(task.usuario_id, task.isapre_id)
+  if (!credenciales) {
+    await recordProcesoStep(task.id, {
+      etapa: 'worker',
+      accion: 'credenciales_no_encontradas',
+      detalle: 'No se encontraron credenciales para ejecutar el demo',
+      status: 'error',
+    })
+    await updateProcesoDemoEstado(task.id, 'fallido', {
+      error: 'No se encontraron credenciales para ejecutar el demo',
+      resumen: 'Proceso demo fallido por falta de credenciales',
+    })
+    return
+  }
+
+  try {
+    const scraper = getScraper(task.isapre_id)
+    const prestacionCodigo = String(task.metadata?.prestacionCodigo ?? '')
+    const isBanmedicaUrgencia =
+      task.isapre_id === 'banmedica'
+      && (prestacionCodigo === 'urgencias_medicas' || task.flujo === 'banmedica_urgencia_demo')
+
+    if (!(scraper instanceof BanmedicaScraper) || !isBanmedicaUrgencia) {
+      throw new Error('No existe un scraper demo configurado para este flujo')
+    }
+
+    const result = await scraper.procesarDemoUrgencia(task, credenciales, {
+      recordStep: async (step) => recordProcesoStep(task.id, step),
+      upsertField: async (field) => upsertProcesoField(task.id, field),
+    })
+
+    if (result.success) {
+      await updateProcesoDemoEstado(task.id, 'completado', {
+        resumen: `Proceso ${task.metadata?.prestacionNombre ?? 'demo'} completado. Formulario identificado y llenado sin envio final.`,
+      })
+      console.log(`✅ Demo #${task.id}: completado`)
+    } else {
+      await updateProcesoDemoEstado(task.id, 'fallido', {
+        error: result.error ?? 'Error desconocido en el proceso demo',
+        resumen: 'Demo Banmedica fallido durante la navegacion automatizada',
+      })
+      console.log(`❌ Demo #${task.id}: ${result.error}`)
+    }
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Error inesperado'
+    await recordProcesoStep(task.id, {
+      etapa: 'worker',
+      accion: 'error_worker',
+      detalle: errorMsg,
+      status: 'error',
+    })
+    await updateProcesoDemoEstado(task.id, 'fallido', {
+      error: errorMsg,
+      resumen: 'Demo Banmedica fallido por error no controlado',
+    })
+    console.log(`❌ Demo #${task.id}: ${errorMsg}`)
   }
 }
 
@@ -237,6 +449,14 @@ async function startWorker(): Promise<void> {
         await checkPortales()
       }
       checkPortalesCounter++
+
+      const demoTasks = await getProcesosDemoPendientes()
+      if (demoTasks.length > 0) {
+        console.log(`\n🧪 ${demoTasks.length} proceso(s) demo pendiente(s)`)
+        for (const task of demoTasks) {
+          await procesarProcesoDemo(task)
+        }
+      }
 
       const tasks = await getReembolsosPendientes()
 

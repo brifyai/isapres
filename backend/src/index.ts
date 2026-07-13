@@ -5,6 +5,7 @@ import authRoutes from './routes/auth.js'
 import reembolsoRoutes from './routes/reembolsos.js'
 import adminRoutes from './routes/admin.js'
 import webhookRoutes from './routes/webhook.js'
+import demoRoutes from './routes/demo.js'
 
 const PORT = process.env.PORT ?? 3000
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? '*'
@@ -34,12 +35,25 @@ await initDatabase()
 
 const app = express()
 
+declare global {
+  namespace Express {
+    interface Request {
+      rawBody?: string
+    }
+  }
+}
+
 // Middleware
 app.use(cors({
   origin: buildCorsOrigin(),
   credentials: true,
 }))
-app.use(express.json({ limit: '10mb' }))
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, _res, buffer) => {
+    ;(req as Request).rawBody = buffer.toString('utf8')
+  },
+}))
 app.use(express.urlencoded({ extended: true }))
 
 // Logging simple
@@ -63,6 +77,7 @@ app.use('/api/reembolsos', reembolsoRoutes)
 app.use('/api/portales', adminRoutes)
 app.use('/api/admin', adminRoutes)
 app.use('/api/webhook', webhookRoutes)
+app.use('/api/demo', demoRoutes)
 
 // Manejo de rutas no encontradas
 app.use('/api', (_req, res) => {

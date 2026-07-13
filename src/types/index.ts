@@ -181,6 +181,7 @@ export interface DashboardKPIs {
 
 /** Estado de salud del script RPA para un portal de Isapre. */
 export type PortalStatus = 'operativo' | 'caido' | 'html_cambiado' | 'mantenimiento';
+export type EstadoProcesoDemo = 'pendiente' | 'en_progreso' | 'completado' | 'fallido';
 
 /** Resultado del monitoreo de un portal de Isapre. */
 export interface PortalMonitor {
@@ -203,6 +204,115 @@ export interface ReembolsoConError extends Reembolso {
   /** Si requiere intervención manual. */
   requiereManual: boolean;
 }
+
+export interface DemoOverview {
+  whatsappEntryUrl: string | null;
+  primaryIsapre: IsapreId | null;
+  activeProcesses: number;
+  latestProcess: DemoProcess | null;
+}
+
+export interface DemoBanmedicaPayload {
+  centroMedicoRut: string;
+  centroMedicoNombre: string;
+  fechaAtencion: string;
+  montoPagado: number;
+  observaciones: string;
+}
+
+export interface DemoProcessStep {
+  id: string;
+  orden: number;
+  etapa: string;
+  accion: string;
+  detalle?: string;
+  url?: string;
+  selector?: string;
+  status: 'info' | 'success' | 'warning' | 'error';
+  payload?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface DemoProcessField {
+  id: string;
+  campoKey: string;
+  label: string;
+  tipo: string;
+  selector?: string;
+  requerido: boolean;
+  valorIngresado?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DemoProcess {
+  id: string;
+  telefono: string;
+  isapreId: IsapreId;
+  flujo: string;
+  origen: string;
+  estado: EstadoProcesoDemo;
+  resumen?: string;
+  error?: string;
+  metadata?: Record<string, unknown>;
+  intentos: number;
+  startedAt?: string;
+  finishedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  pasos?: DemoProcessStep[];
+  campos?: DemoProcessField[];
+}
+
+export interface ConversationState {
+  id: string;
+  etapa: 'idle' | 'awaiting_prestacion' | 'awaiting_field' | 'processing' | 'completed';
+  isapreId?: IsapreId;
+  prestacionId?: string;
+  campoActualId?: string;
+  procesoDemoId?: string;
+  payload?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface ConversationMessage {
+  id: string;
+  direccion: 'entrante' | 'saliente' | 'sistema';
+  tipo: 'text' | 'image' | 'interactive' | 'document' | 'audio' | 'system';
+  contenido?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface PrestacionDisponible {
+  id: string;
+  isapreId: IsapreId;
+  codigo: string;
+  nombre: string;
+  descripcion?: string;
+  requiereFormulario: boolean;
+  requiereAdjuntos: boolean;
+  activa: boolean;
+  orden: number;
+}
+
+export interface ConversationSnapshot {
+  state: ConversationState | null;
+  messages: ConversationMessage[];
+  prestaciones: PrestacionDisponible[];
+}
+
+export const ESTADO_PROCESO_DEMO_META: Record<
+  EstadoProcesoDemo,
+  { label: string; color: 'muted' | 'warning' | 'primary' | 'success' | 'destructive' }
+> = {
+  pendiente: { label: 'Pendiente', color: 'muted' },
+  en_progreso: { label: 'En progreso', color: 'primary' },
+  completado: { label: 'Completado', color: 'success' },
+  fallido: { label: 'Fallido', color: 'destructive' },
+};
 
 /* ──────────────────────── API ───────────────────────────── */
 
