@@ -1,5 +1,5 @@
 /**
- * Tipos compartidos del backend — WSP-ISAPss
+ * Tipos compartidos del backend — WSP-ISAPsss
  */
 
 export type IsapreId =
