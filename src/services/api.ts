@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance } from 'axios'
 import type {
   ApiResponse,
+  ConversationAttachment,
   ConversationMessage,
   ConversationSnapshot,
   ConversationState,
@@ -16,6 +17,7 @@ import type {
   DashboardKPIs,
   PortalMonitor,
   ReembolsoConError,
+  WebConversationMessagePayload,
 } from '@/types'
 
 /**
@@ -155,6 +157,21 @@ interface RawConversationMessage {
   created_at?: string
 }
 
+interface RawConversationAttachment {
+  id: number | string
+  nombre_archivo?: string
+  nombreArchivo?: string
+  mime_type?: string
+  mimeType?: string
+  tamano_bytes?: number | null
+  tamanoBytes?: number | null
+  extracted_data?: Record<string, unknown> | null
+  extractedData?: Record<string, unknown> | null
+  metadata?: Record<string, unknown> | null
+  created_at?: string
+  updated_at?: string
+}
+
 interface RawPrestacionDisponible {
   id: number | string
   isapre_id?: PrestacionDisponible['isapreId']
@@ -268,6 +285,19 @@ function mapConversationMessage(raw: RawConversationMessage): ConversationMessag
     contenido: raw.contenido ?? undefined,
     metadata: raw.metadata ?? undefined,
     createdAt: raw.created_at ?? new Date().toISOString(),
+  }
+}
+
+function mapConversationAttachment(raw: RawConversationAttachment): ConversationAttachment {
+  return {
+    id: String(raw.id),
+    nombreArchivo: raw.nombreArchivo ?? raw.nombre_archivo ?? 'adjunto',
+    mimeType: raw.mimeType ?? raw.mime_type ?? 'application/octet-stream',
+    tamanoBytes: raw.tamanoBytes ?? raw.tamano_bytes ?? undefined,
+    extractedData: raw.extractedData ?? raw.extracted_data ?? undefined,
+    metadata: raw.metadata ?? undefined,
+    createdAt: raw.created_at ?? new Date().toISOString(),
+    updatedAt: raw.updated_at ?? new Date().toISOString(),
   }
 }
 
@@ -499,22 +529,57 @@ export async function createBanmedicaDemo(
   }
 }
 
-export async function getConversationSnapshot(): Promise<ApiResponse<ConversationSnapshot>> {
+export async function getConversationSnapshot(
+  channel: 'web' | 'whatsapp' = 'web',
+): Promise<ApiResponse<ConversationSnapshot>> {
   const { data } = await apiClient.get<
     ApiResponse<{
+      channel: 'web' | 'whatsapp'
       state: RawConversationState | null
       messages: RawConversationMessage[]
       prestaciones: RawPrestacionDisponible[]
+      attachments: RawConversationAttachment[]
     }>
-  >('/demo/conversacion')
+  >('/demo/conversacion', {
+    params: { canal: channel },
+  })
 
   return {
     ...data,
     data: data.data
       ? {
+          channel: data.data.channel,
           state: data.data.state ? mapConversationState(data.data.state) : null,
           messages: data.data.messages.map(mapConversationMessage),
           prestaciones: data.data.prestaciones.map(mapPrestacionDisponible),
+          attachments: data.data.attachments.map(mapConversationAttachment),
+        }
+      : undefined,
+  }
+}
+
+export async function sendWebConversationMessage(
+  payload: WebConversationMessagePayload,
+): Promise<ApiResponse<ConversationSnapshot>> {
+  const { data } = await apiClient.post<
+    ApiResponse<{
+      channel: 'web'
+      state: RawConversationState | null
+      messages: RawConversationMessage[]
+      prestaciones: RawPrestacionDisponible[]
+      attachments: RawConversationAttachment[]
+    }>
+  >('/demo/conversacion/web/message', payload)
+
+  return {
+    ...data,
+    data: data.data
+      ? {
+          channel: data.data.channel,
+          state: data.data.state ? mapConversationState(data.data.state) : null,
+          messages: data.data.messages.map(mapConversationMessage),
+          prestaciones: data.data.prestaciones.map(mapPrestacionDisponible),
+          attachments: data.data.attachments.map(mapConversationAttachment),
         }
       : undefined,
   }

@@ -288,6 +288,17 @@ export interface ConversationMessage {
   createdAt: string;
 }
 
+export interface ConversationAttachment {
+  id: string;
+  nombreArchivo: string;
+  mimeType: string;
+  tamanoBytes?: number;
+  extractedData?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PrestacionDisponible {
   id: string;
   isapreId: IsapreId;
@@ -301,9 +312,24 @@ export interface PrestacionDisponible {
 }
 
 export interface ConversationSnapshot {
+  channel: 'web' | 'whatsapp';
   state: ConversationState | null;
   messages: ConversationMessage[];
   prestaciones: PrestacionDisponible[];
+  attachments: ConversationAttachment[];
+}
+
+export interface WebConversationAttachmentPayload {
+  fileName: string;
+  mimeType: string;
+  base64Data: string;
+  sizeBytes?: number | null;
+}
+
+export interface WebConversationMessagePayload {
+  text?: string;
+  prestacionCodigo?: string | null;
+  attachment?: WebConversationAttachmentPayload | null;
 }
 
 export const ESTADO_PROCESO_DEMO_META: Record<

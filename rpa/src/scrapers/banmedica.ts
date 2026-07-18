@@ -25,6 +25,9 @@ interface BanmedicaDemoForm {
   centroMedicoRut: string
   centroMedicoNombre: string
   fechaAtencion: string
+  tipoPago: string
+  numeroBoleta: string
+  rutProfesional: string
   montoPagado: number
   observaciones: string
 }
@@ -138,6 +141,9 @@ export class BanmedicaScraper extends BaseScraper {
       centroMedicoRut: String(formulario.centroMedicoRut ?? '76.123.456-7'),
       centroMedicoNombre: String(formulario.centroMedicoNombre ?? 'Clinica Demo Banmedica'),
       fechaAtencion: String(formulario.fechaAtencion ?? new Date().toISOString().slice(0, 10)),
+      tipoPago: String(formulario.tipoPago ?? 'boleta'),
+      numeroBoleta: String(formulario.numeroBoleta ?? '7340991'),
+      rutProfesional: String(formulario.rutProfesional ?? '18.466.194-2'),
       montoPagado: Number(formulario.montoPagado ?? 35000),
       observaciones: String(formulario.observaciones ?? 'Demo Banmedica Urgencias sin envio final.'),
     }
@@ -192,11 +198,48 @@ export class BanmedicaScraper extends BaseScraper {
       '.id-carrusel [role="group"]',
     ], 'Seleccionar primer beneficiario disponible', ctx, true)
 
-    await this.safeClick([
-      'text=Urgencias Médicas',
-      'text=Urgencias Medicas',
-      '.option-box:has-text("Urgencias Médicas")',
-    ], 'Elegir prestacion Urgencias Medicas', ctx)
+    await this.page.waitForTimeout(2000)
+    await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => undefined)
+    await this.selectPrestacionCard(['Urgencias Médicas', 'Urgencias Medicas'], ctx)
+  }
+
+  private async selectPrestacionCard(labels: string[], ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      throw new Error('Pagina no inicializada')
+    }
+
+    const cards = this.page.locator('.option-box')
+    const totalCards = await cards.count()
+
+    for (let index = 0; index < totalCards; index += 1) {
+      const card = cards.nth(index)
+      const text = (await card.textContent())?.replace(/\s+/g, ' ').trim() ?? ''
+      const matches = labels.some((label) => text.includes(label))
+      if (!matches) {
+        continue
+      }
+
+      await card.scrollIntoViewIfNeeded().catch(() => undefined)
+      await card.click({ timeout: 10000 }).catch(async () => {
+        await card.click({ force: true, timeout: 10000 })
+      })
+      await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => undefined)
+      await this.page.waitForTimeout(1500)
+      await ctx.recordStep({
+        etapa: 'navegacion',
+        accion: 'click',
+        detalle: 'Elegir prestacion Urgencias Medicas',
+        selector: '.option-box',
+        url: this.page.url(),
+        status: 'success',
+        payload: {
+          matchedText: text,
+        },
+      })
+      return
+    }
+
+    throw new Error('No se encontro el elemento requerido: Elegir prestacion Urgencias Medicas')
   }
 
   private async openReembolsosMenu(ctx: DemoExecutionContext): Promise<boolean> {
@@ -400,6 +443,51 @@ export class BanmedicaScraper extends BaseScraper {
       ctx,
     )
 
+    await this.trySelect(
+      [
+        'select[formcontrolname*="payment"]',
+        'select[formcontrolname*="type"]',
+        'select',
+      ],
+      form.tipoPago,
+      {
+        campoKey: 'tipo_pago',
+        label: 'Tipo de pago',
+        tipo: 'select',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="Número de boleta"]',
+        'input[placeholder*="Numero de boleta"]',
+        'input[placeholder*="boleta"]',
+      ],
+      form.numeroBoleta,
+      {
+        campoKey: 'numero_boleta',
+        label: 'Numero de boleta',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="RUT del profesional"]',
+        'input[placeholder*="RUT del medico"]',
+        'input[placeholder*="RUT del médico"]',
+      ],
+      form.rutProfesional,
+      {
+        campoKey: 'rut_profesional',
+        label: 'RUT del profesional',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
     await this.tryFill(
       [
         'input[placeholder*="Monto"]',
@@ -478,6 +566,69 @@ export class BanmedicaScraper extends BaseScraper {
     await ctx.recordStep({
       etapa: 'formulario',
       accion: 'fill_skip',
+      detalle: `Campo no encontrado: ${field.label}`,
+      url: this.page?.url(),
+      status: 'warning',
+    })
+    return false
+  }
+
+  private async trySelect(
+    selectors: string[],
+    value: string,
+    field: {
+      campoKey: string
+      label: string
+      tipo: string
+      requerido?: boolean
+    },
+    ctx: DemoExecutionContext,
+  ): Promise<boolean> {
+    if (!this.page) {
+      return false
+    }
+
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first()
+      if (await locator.count()) {
+        const options = await locator.locator('option').allTextContents().catch(() => [])
+        const matchedOption = options.find((option) => option.toLowerCase().includes(value.toLowerCase()))
+          ?? options[1]
+          ?? options[0]
+
+        if (!matchedOption) {
+          continue
+        }
+
+        await locator.selectOption({ label: matchedOption }).catch(async () => {
+          await locator.selectOption({ index: 1 }).catch(() => undefined)
+        })
+        await ctx.upsertField({
+          campoKey: field.campoKey,
+          label: field.label,
+          tipo: field.tipo,
+          selector,
+          requerido: field.requerido,
+          valorIngresado: matchedOption,
+        })
+        await ctx.recordStep({
+          etapa: 'formulario',
+          accion: 'select',
+          detalle: `Campo seleccionado: ${field.label}`,
+          selector,
+          url: this.page.url(),
+          status: 'success',
+          payload: {
+            value: matchedOption,
+          },
+        })
+        return true
+      }
+    }
+
+    await ctx.recordStep({
+      etapa: 'formulario',
+      accion: 'select_skip',
       detalle: `Campo no encontrado: ${field.label}`,
       url: this.page?.url(),
       status: 'warning',

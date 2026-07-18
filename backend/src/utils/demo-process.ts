@@ -1,5 +1,7 @@
 import { query, queryOne, withTransaction } from '../db.js'
 import type {
+  ArchivoConversacion,
+  CanalConversacion,
   ConversacionWhatsapp,
   DireccionMensaje,
   IsapreId,
@@ -83,15 +85,30 @@ export async function ensureWhatsappConversation(
   userId: number | null,
   telefono: string,
 ): Promise<ConversacionWhatsapp> {
+  return ensureConversation(userId, telefono, 'whatsapp')
+}
+
+export async function ensureWebConversation(
+  userId: number,
+  telefono: string,
+): Promise<ConversacionWhatsapp> {
+  return ensureConversation(userId, telefono, 'web')
+}
+
+export async function ensureConversation(
+  userId: number | null,
+  telefono: string,
+  channel: CanalConversacion,
+): Promise<ConversacionWhatsapp> {
   const normalizedPhone = normalizePhone(telefono)
 
   const existing = await queryOne<ConversacionWhatsapp>(
     `
       SELECT *
       FROM conversaciones_whatsapp
-      WHERE telefono = $1 AND canal = 'whatsapp'
+      WHERE telefono = $1 AND canal = $2
     `,
-    [normalizedPhone],
+    [normalizedPhone, channel],
   )
 
   if (existing) {
@@ -114,20 +131,30 @@ export async function ensureWhatsappConversation(
   const inserted = await queryOne<ConversacionWhatsapp>(
     `
       INSERT INTO conversaciones_whatsapp (usuario_id, telefono, canal)
-      VALUES ($1, $2, 'whatsapp')
+      VALUES ($1, $2, $3)
       RETURNING *
     `,
-    [userId, normalizedPhone],
+    [userId, normalizedPhone, channel],
   )
 
   if (!inserted) {
-    throw new Error('No se pudo crear la conversacion de WhatsApp')
+    throw new Error(`No se pudo crear la conversacion del canal ${channel}`)
   }
 
   return inserted
 }
 
 export async function logWhatsappMessage(input: {
+  conversacionId: number
+  direccion: DireccionMensaje
+  tipo: TipoMensajeWhatsapp
+  contenido?: string | null
+  metadata?: Record<string, unknown>
+}): Promise<MensajeWhatsapp> {
+  return logConversationMessage(input)
+}
+
+export async function logConversationMessage(input: {
   conversacionId: number
   direccion: DireccionMensaje
   tipo: TipoMensajeWhatsapp
@@ -154,6 +181,66 @@ export async function logWhatsappMessage(input: {
   }
 
   return row
+}
+
+export async function createConversationAttachment(input: {
+  conversacionId: number
+  userId: number | null
+  processId?: number | null
+  fileName: string
+  mimeType: string
+  sizeBytes?: number | null
+  base64Data: string
+  extractedData?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}): Promise<ArchivoConversacion> {
+  const row = await queryOne<ArchivoConversacion>(
+    `
+      INSERT INTO archivos_conversacion (
+        conversacion_id,
+        usuario_id,
+        proceso_demo_id,
+        nombre_archivo,
+        mime_type,
+        tamano_bytes,
+        contenido_base64,
+        extracted_data,
+        metadata
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
+      RETURNING *
+    `,
+    [
+      input.conversacionId,
+      input.userId,
+      input.processId ?? null,
+      input.fileName,
+      input.mimeType,
+      input.sizeBytes ?? null,
+      input.base64Data,
+      JSON.stringify(input.extractedData ?? {}),
+      JSON.stringify(input.metadata ?? {}),
+    ],
+  )
+
+  if (!row) {
+    throw new Error('No se pudo guardar el adjunto de la conversación')
+  }
+
+  return row
+}
+
+export async function listConversationAttachments(conversationId: number, limit = 10): Promise<ArchivoConversacion[]> {
+  return query<ArchivoConversacion>(
+    `
+      SELECT *
+      FROM archivos_conversacion
+      WHERE conversacion_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+    `,
+    [conversationId, limit],
+  )
 }
 
 export async function createBanmedicaDemoProcess(input: {

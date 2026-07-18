@@ -7,7 +7,9 @@ import {
   FileText,
   LogOut,
   MessageCircle,
+  Paperclip,
   RefreshCw,
+  SendHorizontal,
   ShieldCheck,
   TriangleAlert,
 } from 'lucide-react'
@@ -15,6 +17,7 @@ import { useAuth } from '@/context/AuthContext'
 import { Banner } from '@/components/ui/Banner'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { Select } from '@/components/ui/Select'
 import {
   createBanmedicaDemo,
   getConversationSnapshot,
@@ -23,6 +26,7 @@ import {
   getDemoProcesoById,
   getDemoProcesos,
   getReembolsos,
+  sendWebConversationMessage,
 } from '@/services/api'
 import type {
   ConversationSnapshot,
@@ -31,6 +35,7 @@ import type {
   DemoOverview,
   DemoProcess,
   Reembolso,
+  WebConversationMessagePayload,
 } from '@/types'
 import { ESTADO_PROCESO_DEMO_META, ESTADO_SOLICITUD_META, ISAPRES } from '@/types'
 import { cn, formatCLP, formatDate } from '@/lib/utils'
@@ -47,6 +52,18 @@ const emptyKPIs: DashboardKPIs = {
   totalReembolsado: 0,
   solicitudesPendientes: 0,
   solicitudesExitosas: 0,
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : ''
+      resolve(result.replace(/^data:[^;]+;base64,/, ''))
+    }
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo seleccionado'))
+    reader.readAsDataURL(file)
+  })
 }
 
 function getProcessBadgeClass(status: DemoProcess['estado']): string {
@@ -90,8 +107,12 @@ export function DashboardPage() {
   const [procesos, setProcesos] = useState<DemoProcess[]>([])
   const [selectedProcess, setSelectedProcess] = useState<DemoProcess | null>(null)
   const [form, setForm] = useState<DemoBanmedicaPayload>(defaultDemoPayload)
+  const [messageText, setMessageText] = useState('')
+  const [selectedPrestacionCodigo, setSelectedPrestacionCodigo] = useState('')
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isSendingMessage, setIsSendingMessage] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const currentIsapreName = useMemo(() => {
@@ -115,7 +136,7 @@ export function DashboardPage() {
         getDashboardKPIs(),
         getReembolsos(),
         getDemoProcesos(),
-        getConversationSnapshot(),
+        getConversationSnapshot('web'),
       ])
 
       if (overviewResponse.success && overviewResponse.data) {
@@ -181,6 +202,51 @@ export function DashboardPage() {
       return
     }
     window.open(overview.whatsappEntryUrl, '_blank', 'noopener,noreferrer')
+  }
+
+  const handleSendWebMessage = async (override?: Partial<WebConversationMessagePayload>) => {
+    const finalText = override?.text ?? messageText
+    const finalPrestacionCodigo = override?.prestacionCodigo ?? (selectedPrestacionCodigo || undefined)
+    const finalAttachment = override?.attachment ?? null
+
+    if (!finalText.trim() && !finalPrestacionCodigo && !selectedFile && !finalAttachment) {
+      setError('Debes escribir un mensaje, elegir una prestación o adjuntar una boleta.')
+      return
+    }
+
+    setIsSendingMessage(true)
+    setError(null)
+
+    try {
+      const attachmentPayload = finalAttachment ?? (selectedFile
+        ? {
+            fileName: selectedFile.name,
+            mimeType: selectedFile.type || 'application/octet-stream',
+            base64Data: await fileToBase64(selectedFile),
+            sizeBytes: selectedFile.size,
+          }
+        : null)
+
+      const response = await sendWebConversationMessage({
+        text: finalText.trim() || undefined,
+        prestacionCodigo: finalPrestacionCodigo ?? null,
+        attachment: attachmentPayload,
+      })
+
+      if (!response.success || !response.data) {
+        throw new Error(response.error ?? 'No se pudo procesar el mensaje web')
+      }
+
+      setConversation(response.data)
+      setMessageText('')
+      setSelectedPrestacionCodigo('')
+      setSelectedFile(null)
+      await loadData()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo enviar el mensaje web')
+    } finally {
+      setIsSendingMessage(false)
+    }
   }
 
   if (isLoading) {
@@ -362,9 +428,9 @@ export function DashboardPage() {
           <div className="rounded-2xl border bg-card p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-semibold">Estado conversacional</h2>
+                <h2 className="text-lg font-semibold">Estado conversacional web</h2>
                 <p className="text-sm text-muted-foreground">
-                  Etapa actual del flujo de WhatsApp y catálogo disponible para la Isapre enrolada.
+                  Simulador de mensajería mientras WhatsApp termina su publicación en Meta/Kapso.
                 </p>
               </div>
               <MessageCircle className="h-5 w-5 text-primary" />
@@ -379,6 +445,36 @@ export function DashboardPage() {
                     Última actualización: {formatDate(conversation.state.updatedAt)}
                   </p>
                 )}
+              </div>
+
+              <div className="rounded-xl border p-4">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">Acciones rápidas</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void handleSendWebMessage({ text: 'menú' })}
+                    isLoading={isSendingMessage}
+                  >
+                    Menú
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleSendWebMessage({ text: 'estado' })}
+                    isLoading={isSendingMessage}
+                  >
+                    Estado
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleSendWebMessage({ text: 'ayuda' })}
+                    isLoading={isSendingMessage}
+                  >
+                    Ayuda
+                  </Button>
+                </div>
               </div>
 
               <div className="rounded-xl border p-4">
@@ -397,32 +493,114 @@ export function DashboardPage() {
                   ))}
                 </div>
               </div>
+
+              <div className="rounded-xl border p-4">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">Últimos adjuntos</p>
+                <div className="mt-3 space-y-2">
+                  {(conversation?.attachments ?? []).length === 0 && (
+                    <p className="text-sm text-muted-foreground">Todavía no se han cargado boletas o vouchers en el canal web.</p>
+                  )}
+                  {(conversation?.attachments ?? []).slice(0, 4).map((attachment) => (
+                    <div key={attachment.id} className="rounded-lg bg-secondary/40 px-3 py-2">
+                      <p className="text-sm font-medium">{attachment.nombreArchivo}</p>
+                      <p className="text-xs text-muted-foreground">{attachment.mimeType}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
           <div className="rounded-2xl border bg-card p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-semibold">Mensajes WhatsApp</h2>
+                <h2 className="text-lg font-semibold">Mensajería web de pruebas</h2>
                 <p className="text-sm text-muted-foreground">
-                  Últimos mensajes registrados por el webhook y el motor conversacional.
+                  Permite simular el chat, adjuntar boletas y probar la extracción antes de habilitar WhatsApp productivo.
                 </p>
               </div>
               <MessageCircle className="h-5 w-5 text-primary" />
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-4">
+              <div className="rounded-xl border p-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Select
+                    label="Prestación sugerida"
+                    value={selectedPrestacionCodigo}
+                    onChange={(event) => setSelectedPrestacionCodigo(event.target.value)}
+                    options={(conversation?.prestaciones ?? []).map((prestacion) => ({
+                      value: prestacion.codigo,
+                      label: prestacion.nombre,
+                    }))}
+                    placeholder="Elegir prestación"
+                  />
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-foreground" htmlFor="web-boleta">
+                      Adjuntar boleta o voucher
+                    </label>
+                    <input
+                      id="web-boleta"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,application/pdf"
+                      className="block h-11 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
+                      onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Sube una imagen o PDF. La extracción automática se aplica sobre imágenes.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <Input
+                    label="Mensaje"
+                    placeholder="Ej: quiero iniciar un reembolso, o adjunto una boleta de urgencia"
+                    value={messageText}
+                    onChange={(event) => setMessageText(event.target.value)}
+                  />
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <Button onClick={() => void handleSendWebMessage()} isLoading={isSendingMessage}>
+                    <SendHorizontal className="h-4 w-4" />
+                    Enviar al inbox web
+                  </Button>
+                  {selectedFile && (
+                    <div className="inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
+                      <Paperclip className="h-3.5 w-3.5" />
+                      {selectedFile.name}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {(conversation?.messages ?? []).length === 0 && (
-                <p className="text-sm text-muted-foreground">Todavía no hay mensajes registrados para este usuario.</p>
+                <p className="text-sm text-muted-foreground">Todavía no hay mensajes registrados para este usuario en el canal web.</p>
               )}
               {(conversation?.messages ?? []).map((message) => (
                 <div key={message.id} className="rounded-xl border p-4">
+                  {(() => {
+                    const prestacionCodigo = typeof message.metadata?.prestacionCodigo === 'string'
+                      ? message.metadata.prestacionCodigo
+                      : null
+
+                    return (
+                      <>
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm font-medium capitalize">{message.direccion}</p>
                     <span className="text-xs text-muted-foreground">{formatDate(message.createdAt)}</span>
                   </div>
                   <p className="mt-2 text-sm text-foreground">{message.contenido ?? '(sin contenido visible)'}</p>
                   <p className="mt-1 text-xs text-muted-foreground">Tipo: {message.tipo}</p>
+                  {prestacionCodigo && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Prestación: {prestacionCodigo}
+                    </p>
+                  )}
+                      </>
+                    )
+                  })()}
                 </div>
               ))}
             </div>

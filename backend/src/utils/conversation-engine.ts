@@ -1,9 +1,12 @@
 import { query, queryOne } from '../db.js'
 import type {
+  ArchivoConversacion,
+  CanalConversacion,
   EstadoConversacion,
   EtapaConversacion,
   IsapreId,
   KapsoWebhookPayload,
+  MensajeWhatsapp,
   PrestacionCampoCatalogo,
   PrestacionCatalogo,
   ProcesoDemo,
@@ -12,10 +15,12 @@ import type {
 } from '../types.js'
 import {
   buildWhatsappEntryUrl,
+  createConversationAttachment,
   createPrestacionProcess,
-  ensureWhatsappConversation,
+  ensureConversation,
   getUserPrimaryIsapre,
-  logWhatsappMessage,
+  listConversationAttachments,
+  logConversationMessage,
 } from './demo-process.js'
 import {
   hasKapsoSendConfig,
@@ -25,6 +30,7 @@ import {
 } from './kapso-client.js'
 import {
   classifyPrestacionWithAI,
+  extractBoletaDataWithAI,
   extractFieldValueWithAI,
   hasOpenAIConfig,
 } from './openai-client.js'
@@ -40,6 +46,13 @@ interface NormalizedIncomingMessage {
   selectionTitle: string | null
   mediaUrl: string | null
   raw: KapsoWebhookPayload
+}
+
+interface WebConversationAttachmentInput {
+  fileName: string
+  mimeType: string
+  base64Data: string
+  sizeBytes?: number | null
 }
 
 function normalizeText(value: string): string {
@@ -264,9 +277,261 @@ async function getLatestProcess(userId: number): Promise<ProcesoDemo | null> {
   )) ?? null
 }
 
+function sanitizeBase64Payload(base64Data: string): string {
+  return base64Data.replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '')
+}
+
+function isImageMimeType(mimeType: string): boolean {
+  return /^image\/(png|jpe?g|webp)$/i.test(mimeType)
+}
+
+function buildAnswersFromExtraction(
+  extraction: NonNullable<Awaited<ReturnType<typeof extractBoletaDataWithAI>>>,
+): Record<string, string> {
+  const answers: Record<string, string> = {}
+  const { campos } = extraction
+
+  if (campos.centroMedicoRut) answers.centro_medico_rut = campos.centroMedicoRut
+  if (campos.centroMedicoNombre) answers.centro_medico_nombre = campos.centroMedicoNombre
+  if (campos.fechaAtencion) answers.fecha_atencion = campos.fechaAtencion
+  if (campos.montoPagado) answers.monto_pagado = campos.montoPagado
+  if (campos.numeroBoleta) answers.numero_boleta = campos.numeroBoleta
+  if (campos.rutProfesional) answers.rut_profesional = campos.rutProfesional
+  if (campos.tipoPago) answers.tipo_pago = campos.tipoPago
+  if (campos.observaciones) answers.observaciones = campos.observaciones
+
+  return answers
+}
+
+function getNextPendingField(
+  fields: PrestacionCampoCatalogo[],
+  answers: Record<string, unknown>,
+): PrestacionCampoCatalogo | null {
+  return fields.find((field) => {
+    const current = answers[field.campo_key]
+    return typeof current !== 'string' || current.trim().length === 0
+  }) ?? null
+}
+
+async function continueConversationWithAnswers(input: {
+  conversationId: number
+  telefono: string
+  channel?: CanalConversacion
+  state: EstadoConversacion
+  user: Usuario
+  prestacion: PrestacionCatalogo
+  answers: Record<string, string>
+  metadata?: Record<string, unknown>
+}): Promise<void> {
+  const fields = await getFieldsByPrestacion(input.prestacion.id)
+  const nextField = getNextPendingField(fields, input.answers)
+
+  if (nextField) {
+    await upsertConversationState({
+      conversacionId: input.conversationId,
+      userId: input.user.id,
+      isapreId: input.state.isapre_id,
+      stage: 'awaiting_field',
+      prestacionId: input.prestacion.id,
+      campoActualId: nextField.id,
+      procesoDemoId: input.state.proceso_demo_id,
+      payload: {
+        ...((input.state.payload ?? {}) as Record<string, unknown>),
+        selectedPrestacion: input.prestacion.codigo,
+        answers: input.answers,
+      },
+      metadata: {
+        ...((input.state.metadata ?? {}) as Record<string, unknown>),
+        ...(input.metadata ?? {}),
+      },
+      lastMessageId: input.state.last_message_id,
+    })
+    await askField(input.conversationId, input.telefono, nextField, input.channel)
+    return
+  }
+
+  const process = await createPrestacionProcess({
+    userId: input.user.id,
+    telefono: input.telefono,
+    origen: input.channel === 'web' ? 'dashboard' : 'whatsapp',
+    isapreId: input.state.isapre_id as IsapreId,
+    prestacionCodigo: input.prestacion.codigo,
+    prestacionNombre: input.prestacion.nombre,
+    requiereAdjuntos: input.prestacion.requiere_adjuntos,
+    requiereFormulario: input.prestacion.requiere_formulario,
+    answers: input.answers,
+    fieldDefinitions: fields,
+  })
+
+  await upsertConversationState({
+    conversacionId: input.conversationId,
+    userId: input.user.id,
+    isapreId: input.state.isapre_id,
+    stage: 'processing',
+    prestacionId: input.prestacion.id,
+    campoActualId: null,
+    procesoDemoId: process.id,
+    payload: {
+      ...((input.state.payload ?? {}) as Record<string, unknown>),
+      selectedPrestacion: input.prestacion.codigo,
+      answers: input.answers,
+    },
+    metadata: {
+      ...((input.state.metadata ?? {}) as Record<string, unknown>),
+      ...(input.metadata ?? {}),
+    },
+    lastMessageId: input.state.last_message_id,
+  })
+
+  await sendReply({
+    conversationId: input.conversationId,
+    to: input.telefono,
+    channel: input.channel,
+    body: `Perfecto. Ya reuní los datos para "${input.prestacion.nombre}". Ahora iniciaré el recorrido automatizado y dejaré todo registrado en tu historial.`,
+    metadata: {
+      processId: process.id,
+      prestacionCodigo: input.prestacion.codigo,
+    },
+  })
+}
+
+async function processAttachmentForCurrentState(input: {
+  conversationId: number
+  telefono: string
+  channel: CanalConversacion
+  state: EstadoConversacion
+  user: Usuario
+  attachment: WebConversationAttachmentInput
+  declaredPrestacionCodigo?: string | null
+}): Promise<void> {
+  const base64Data = sanitizeBase64Payload(input.attachment.base64Data)
+
+  let prestacion = input.state.prestacion_id
+    ? await getPrestacionById(input.state.prestacion_id)
+    : null
+
+  if (!prestacion && input.declaredPrestacionCodigo && input.state.isapre_id) {
+    const prestaciones = await getPrestacionesByIsapre(input.state.isapre_id)
+    prestacion = await resolvePrestacion(input.declaredPrestacionCodigo, prestaciones)
+  }
+
+  let extraction: Awaited<ReturnType<typeof extractBoletaDataWithAI>> = null
+  if (hasOpenAIConfig() && isImageMimeType(input.attachment.mimeType)) {
+    extraction = await extractBoletaDataWithAI({
+      mimeType: input.attachment.mimeType,
+      base64Data,
+      prestacionHint: prestacion?.codigo ?? input.declaredPrestacionCodigo ?? null,
+    })
+  }
+
+  const attachmentRecord = await createConversationAttachment({
+    conversacionId: input.conversationId,
+    userId: input.user.id,
+    processId: input.state.proceso_demo_id,
+    fileName: input.attachment.fileName,
+    mimeType: input.attachment.mimeType,
+    sizeBytes: input.attachment.sizeBytes ?? null,
+    base64Data,
+    extractedData: extraction ?? {},
+    metadata: {
+      channel: input.channel,
+    },
+  })
+
+  if (!extraction) {
+    await sendReply({
+      conversationId: input.conversationId,
+      to: input.telefono,
+      channel: input.channel,
+      body: isImageMimeType(input.attachment.mimeType)
+        ? 'Adjunto recibido. No pude extraer datos útiles automáticamente desde la boleta.'
+        : 'Adjunto recibido. En esta fase demo la extracción automática está habilitada para imágenes PNG, JPG y WEBP.',
+      metadata: {
+        attachmentId: attachmentRecord.id,
+        attachmentName: attachmentRecord.nombre_archivo,
+      },
+    })
+    return
+  }
+
+  if (!prestacion && input.state.isapre_id) {
+    const prestaciones = await getPrestacionesByIsapre(input.state.isapre_id)
+    const suggested = extraction.prestacionSugerida
+      ? prestaciones.find((item) => item.codigo === extraction.prestacionSugerida) ?? null
+      : null
+
+    await sendReply({
+      conversationId: input.conversationId,
+      to: input.telefono,
+      channel: input.channel,
+      body: suggested
+        ? `Analicé tu boleta. Prestación sugerida: "${suggested.nombre}". ${extraction.resumen}`
+        : `Analicé tu boleta. ${extraction.resumen} Ahora confirma primero el tipo de prestación para continuar.`,
+      metadata: {
+        attachmentId: attachmentRecord.id,
+        extraction,
+      },
+    })
+    return
+  }
+
+  if (!prestacion) {
+    return
+  }
+
+  if (!prestacion.requiere_formulario) {
+    await sendReply({
+      conversationId: input.conversationId,
+      to: input.telefono,
+      channel: input.channel,
+      body: `Boleta analizada para "${prestacion.nombre}". ${extraction.resumen} Esta prestación queda registrada y preparada para la fase de adjuntos, pero aún no ejecuta un flujo automático completo.`,
+      metadata: {
+        attachmentId: attachmentRecord.id,
+        extraction,
+        prestacionCodigo: prestacion.codigo,
+      },
+    })
+    return
+  }
+
+  const extractedAnswers = buildAnswersFromExtraction(extraction)
+  const currentPayload = (input.state.payload ?? {}) as Record<string, unknown>
+  const mergedAnswers = {
+    ...((currentPayload.answers as Record<string, string> | undefined) ?? {}),
+    ...extractedAnswers,
+  }
+
+  await sendReply({
+    conversationId: input.conversationId,
+    to: input.telefono,
+    channel: input.channel,
+    body: `Boleta analizada. ${extraction.resumen}`,
+    metadata: {
+      attachmentId: attachmentRecord.id,
+      extraction,
+      prestacionCodigo: prestacion.codigo,
+    },
+  })
+
+  await continueConversationWithAnswers({
+    conversationId: input.conversationId,
+    telefono: input.telefono,
+    channel: input.channel,
+    state: input.state,
+    user: input.user,
+    prestacion,
+    answers: mergedAnswers,
+    metadata: {
+      attachmentId: attachmentRecord.id,
+      extractionSummary: extraction.resumen,
+    },
+  })
+}
+
 async function sendReply(input: {
   conversationId: number
   to: string
+  channel?: CanalConversacion
   body: string
   type?: 'text' | 'buttons' | 'list'
   buttons?: Array<{ id: string; title: string }>
@@ -276,7 +541,7 @@ async function sendReply(input: {
 }): Promise<void> {
   try {
     let response: Record<string, unknown> | null = null
-    if (hasKapsoSendConfig()) {
+    if ((input.channel ?? 'whatsapp') === 'whatsapp' && hasKapsoSendConfig()) {
       if (input.type === 'buttons' && input.buttons?.length) {
         response = await sendKapsoButtons({
           to: input.to,
@@ -298,7 +563,7 @@ async function sendReply(input: {
       }
     }
 
-    await logWhatsappMessage({
+    await logConversationMessage({
       conversacionId: input.conversationId,
       direccion: 'saliente',
       tipo: input.type === 'text' || !input.type ? 'text' : 'interactive',
@@ -310,7 +575,7 @@ async function sendReply(input: {
     })
   } catch (error) {
     console.error('Error enviando mensaje por Kapso:', error)
-    await logWhatsappMessage({
+    await logConversationMessage({
       conversacionId: input.conversationId,
       direccion: 'sistema',
       tipo: 'system',
@@ -326,6 +591,7 @@ async function sendReply(input: {
 async function sendPrestacionesMenu(input: {
   conversationId: number
   telefono: string
+  channel?: CanalConversacion
   user: Usuario
   isapreId: IsapreId
   prestaciones: PrestacionCatalogo[]
@@ -335,6 +601,7 @@ async function sendPrestacionesMenu(input: {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
+      channel: input.channel,
       body,
       type: 'buttons',
       buttons: input.prestaciones.map((prestacion) => ({
@@ -351,6 +618,7 @@ async function sendPrestacionesMenu(input: {
   await sendReply({
     conversationId: input.conversationId,
     to: input.telefono,
+    channel: input.channel,
     body,
     type: 'list',
     buttonText: 'Elegir prestación',
@@ -379,10 +647,12 @@ async function askField(
   conversationId: number,
   telefono: string,
   field: PrestacionCampoCatalogo,
+  channel?: CanalConversacion,
 ): Promise<void> {
   await sendReply({
     conversationId,
     to: telefono,
+    channel,
     body: getHelpTextForField(field),
     metadata: {
       stage: 'awaiting_field',
@@ -509,12 +779,14 @@ async function handleStatusCommand(
   conversationId: number,
   telefono: string,
   userId: number,
+  channel?: CanalConversacion,
 ): Promise<void> {
   const process = await getLatestProcess(userId)
   if (!process) {
     await sendReply({
       conversationId,
       to: telefono,
+      channel,
       body: 'Aún no tengo procesos activos. Escríbeme cualquier mensaje y te mostraré las prestaciones disponibles.',
     })
     return
@@ -523,6 +795,7 @@ async function handleStatusCommand(
   await sendReply({
     conversationId,
     to: telefono,
+    channel,
     body: `Tu último proceso está en estado "${process.estado}". Resumen: ${process.resumen ?? 'sin resumen aún'}.`,
     metadata: {
       processId: process.id,
@@ -534,6 +807,7 @@ async function handleStatusCommand(
 async function handleFieldFlow(input: {
   conversationId: number
   telefono: string
+  channel?: CanalConversacion
   state: EstadoConversacion
   text: string
   user: Usuario
@@ -550,6 +824,7 @@ async function handleFieldFlow(input: {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
+      channel: input.channel,
       body: 'Perdí el contexto de la conversación. Te volveré a mostrar el menú.',
     })
     return
@@ -570,6 +845,7 @@ async function handleFieldFlow(input: {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
+      channel: input.channel,
       body: parsed.error ?? `No pude validar ${field.label}. ${getHelpTextForField(field)}`,
       metadata: {
         campoKey: field.campo_key,
@@ -585,73 +861,21 @@ async function handleFieldFlow(input: {
     [field.campo_key]: parsed.normalized,
   }
 
-  const fields = await getFieldsByPrestacion(prestacion.id)
-  const currentIndex = fields.findIndex((item) => item.id === field.id)
-  const nextField = currentIndex >= 0 ? fields[currentIndex + 1] ?? null : null
-
-  if (nextField) {
-    await upsertConversationState({
-      conversacionId: input.conversationId,
-      userId: input.user.id,
-      isapreId: input.state.isapre_id,
-      stage: 'awaiting_field',
-      prestacionId: prestacion.id,
-      campoActualId: nextField.id,
-      procesoDemoId: input.state.proceso_demo_id,
-      payload: {
-        ...currentPayload,
-        answers,
-      },
-      metadata: input.state.metadata,
-      lastMessageId: input.state.last_message_id,
-    })
-    await askField(input.conversationId, input.telefono, nextField)
-    return
-  }
-
-  const process = await createPrestacionProcess({
-    userId: input.user.id,
-    telefono: input.telefono,
-    origen: 'whatsapp',
-    isapreId: input.state.isapre_id,
-    prestacionCodigo: prestacion.codigo,
-    prestacionNombre: prestacion.nombre,
-    requiereAdjuntos: prestacion.requiere_adjuntos,
-    requiereFormulario: prestacion.requiere_formulario,
-    answers,
-    fieldDefinitions: fields,
-  })
-
-  await upsertConversationState({
-    conversacionId: input.conversationId,
-    userId: input.user.id,
-    isapreId: input.state.isapre_id,
-    stage: 'processing',
-    prestacionId: prestacion.id,
-    campoActualId: null,
-    procesoDemoId: process.id,
-    payload: {
-      ...currentPayload,
-      answers,
-    },
-    metadata: input.state.metadata,
-    lastMessageId: input.state.last_message_id,
-  })
-
-  await sendReply({
+  await continueConversationWithAnswers({
     conversationId: input.conversationId,
-    to: input.telefono,
-    body: `Perfecto. Ya reuní los datos para "${prestacion.nombre}". Ahora iniciaré el recorrido automatizado y dejaré todo registrado en tu historial.`,
-    metadata: {
-      processId: process.id,
-      prestacionCodigo: prestacion.codigo,
-    },
+    telefono: input.telefono,
+    channel: input.channel,
+    state: input.state,
+    user: input.user,
+    prestacion,
+    answers,
   })
 }
 
 async function startConversationMenu(input: {
   conversationId: number
   telefono: string
+  channel?: CanalConversacion
   user: Usuario
   isapreId: IsapreId
 }): Promise<void> {
@@ -660,6 +884,7 @@ async function startConversationMenu(input: {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
+      channel: input.channel,
       body: `Tu Isapre enrolada es ${input.isapreId}, pero aún no tengo un catálogo conversacional cargado para ella.`,
     })
     await upsertConversationState({
@@ -684,6 +909,7 @@ async function startConversationMenu(input: {
   await sendPrestacionesMenu({
     conversationId: input.conversationId,
     telefono: input.telefono,
+    channel: input.channel,
     user: input.user,
     isapreId: input.isapreId,
     prestaciones,
@@ -693,6 +919,7 @@ async function startConversationMenu(input: {
 async function handlePrestacionSelection(input: {
   conversationId: number
   telefono: string
+  channel?: CanalConversacion
   state: EstadoConversacion
   user: Usuario
   selectedRaw: string
@@ -707,11 +934,13 @@ async function handlePrestacionSelection(input: {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
+      channel: input.channel,
       body: 'No pude identificar la prestación. Elige una opción del menú o escríbela nuevamente.',
     })
     await sendPrestacionesMenu({
       conversationId: input.conversationId,
       telefono: input.telefono,
+      channel: input.channel,
       user: input.user,
       isapreId: input.state.isapre_id,
       prestaciones,
@@ -734,6 +963,7 @@ async function handlePrestacionSelection(input: {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
+      channel: input.channel,
       body: `La prestación "${prestacion.nombre}" fue detectada correctamente, pero en esta fase demo aún queda preparada para adjuntos y no para ejecución completa. Puedes escoger otra prestación o esperar la siguiente iteración.`,
       metadata: {
         prestacionCodigo: prestacion.codigo,
@@ -765,10 +995,225 @@ async function handlePrestacionSelection(input: {
   await sendReply({
     conversationId: input.conversationId,
     to: input.telefono,
+    channel: input.channel,
     body: `Perfecto, comenzaremos con "${prestacion.nombre}". Te pediré los datos uno por uno.`,
     metadata: { prestacionCodigo: prestacion.codigo },
   })
-  await askField(input.conversationId, input.telefono, firstField)
+  await askField(input.conversationId, input.telefono, firstField, input.channel)
+}
+
+export async function getConversationSnapshotByChannel(
+  userId: number,
+  channel: CanalConversacion,
+): Promise<{
+  state: EstadoConversacion | null
+  messages: Array<Awaited<ReturnType<typeof logConversationMessage>>>
+  prestaciones: PrestacionCatalogo[]
+  attachments: ArchivoConversacion[]
+}> {
+  const usuario = await queryOne<{ id: number }>(
+    'SELECT id FROM usuarios WHERE id = $1',
+    [userId],
+  )
+
+  if (!usuario) {
+    throw new Error('Usuario no encontrado')
+  }
+
+  const conversacion = await queryOne<{ id: number }>(
+    `
+      SELECT id
+      FROM conversaciones_whatsapp
+      WHERE usuario_id = $1 AND canal = $2
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `,
+    [userId, channel],
+  )
+
+  if (!conversacion) {
+    return {
+      state: null,
+      messages: [],
+      prestaciones: [],
+      attachments: [],
+    }
+  }
+
+  const state = await getConversationState(conversacion.id)
+  const messages = await query<MensajeWhatsapp>(
+    `
+      SELECT *
+      FROM mensajes_whatsapp
+      WHERE conversacion_id = $1
+      ORDER BY created_at DESC
+      LIMIT 30
+    `,
+    [conversacion.id],
+  )
+  const prestaciones = state?.isapre_id
+    ? await getPrestacionesByIsapre(state.isapre_id)
+    : []
+  const attachments = await listConversationAttachments(conversacion.id, 12)
+
+  return {
+    state,
+    messages,
+    prestaciones,
+    attachments,
+  }
+}
+
+export async function processWebConversationMessage(input: {
+  userId: number
+  text?: string
+  prestacionCodigo?: string | null
+  attachment?: WebConversationAttachmentInput | null
+}): Promise<void> {
+  const usuario = await queryOne<Usuario>(
+    'SELECT * FROM usuarios WHERE id = $1',
+    [input.userId],
+  )
+
+  if (!usuario) {
+    throw new Error('Usuario no encontrado')
+  }
+
+  const conversacion = await ensureConversation(usuario.id, usuario.telefono, 'web')
+  const isapreId = await getUserPrimaryIsapre(usuario.id)
+  const previousState = await getConversationState(conversacion.id)
+  const ensuredState = await upsertConversationState({
+    conversacionId: conversacion.id,
+    userId: usuario.id,
+    isapreId,
+    stage: previousState?.etapa ?? 'idle',
+    prestacionId: previousState?.prestacion_id ?? null,
+    campoActualId: previousState?.campo_actual_id ?? null,
+    procesoDemoId: previousState?.proceso_demo_id ?? null,
+    payload: previousState?.payload ?? {},
+    metadata: previousState?.metadata ?? {},
+  })
+
+  const trimmedText = input.text?.trim() ?? ''
+  const selectedPrestacion = input.prestacionCodigo?.trim() ?? ''
+  const normalizedInput = selectedPrestacion || trimmedText
+  const command = normalizeText(trimmedText || normalizedInput)
+
+  await logConversationMessage({
+    conversacionId: conversacion.id,
+    direccion: 'entrante',
+    tipo: input.attachment
+      ? (input.attachment.mimeType.startsWith('image/') ? 'image' : 'document')
+      : 'text',
+    contenido: normalizedInput || (input.attachment ? `[Adjunto] ${input.attachment.fileName}` : null),
+    metadata: {
+      channel: 'web',
+      prestacionCodigo: selectedPrestacion || null,
+      attachment: input.attachment
+        ? {
+            fileName: input.attachment.fileName,
+            mimeType: input.attachment.mimeType,
+            sizeBytes: input.attachment.sizeBytes ?? null,
+          }
+        : null,
+    },
+  })
+
+  if (!isapreId) {
+    await sendReply({
+      conversationId: conversacion.id,
+      to: usuario.telefono,
+      channel: 'web',
+      body: `Encontré tu usuario, pero aún no veo una Isapre enrolada. Completa tu enrolamiento en ${buildWhatsappEntryUrl() ?? PUBLIC_APP_URL}.`,
+    })
+    return
+  }
+
+  if (!selectedPrestacion && (command === 'ayuda' || command === 'help')) {
+    await sendReply({
+      conversationId: conversacion.id,
+      to: usuario.telefono,
+      channel: 'web',
+      body: 'Puedo simular la conversación de reembolso, pedir prestación, recibir una boleta y prellenar datos del formulario. Escribe "menú" para empezar o "estado" para revisar tu proceso.',
+    })
+    return
+  }
+
+  if (!selectedPrestacion && (command === 'estado' || command === 'mis reembolsos')) {
+    await handleStatusCommand(conversacion.id, usuario.telefono, usuario.id, 'web')
+  } else if (!selectedPrestacion && (command === 'menu' || command === 'menú' || command === 'reiniciar')) {
+    await startConversationMenu({
+      conversationId: conversacion.id,
+      telefono: usuario.telefono,
+      channel: 'web',
+      user: usuario,
+      isapreId,
+    })
+  } else if (selectedPrestacion) {
+    await handlePrestacionSelection({
+      conversationId: conversacion.id,
+      telefono: usuario.telefono,
+      channel: 'web',
+      state: ensuredState,
+      user: usuario,
+      selectedRaw: selectedPrestacion,
+    })
+  } else {
+    switch (ensuredState.etapa) {
+      case 'idle':
+      case 'completed':
+        await startConversationMenu({
+          conversationId: conversacion.id,
+          telefono: usuario.telefono,
+          channel: 'web',
+          user: usuario,
+          isapreId,
+        })
+        break
+      case 'awaiting_prestacion':
+        if (normalizedInput) {
+          await handlePrestacionSelection({
+            conversationId: conversacion.id,
+            telefono: usuario.telefono,
+            channel: 'web',
+            state: ensuredState,
+            user: usuario,
+            selectedRaw: normalizedInput,
+          })
+        }
+        break
+      case 'awaiting_field':
+        if (trimmedText) {
+          await handleFieldFlow({
+            conversationId: conversacion.id,
+            telefono: usuario.telefono,
+            channel: 'web',
+            state: ensuredState,
+            text: trimmedText,
+            user: usuario,
+          })
+        }
+        break
+      case 'processing':
+        await handleStatusCommand(conversacion.id, usuario.telefono, usuario.id, 'web')
+        break
+      default:
+        break
+    }
+  }
+
+  const refreshedState = await getConversationState(conversacion.id) ?? ensuredState
+  if (input.attachment) {
+    await processAttachmentForCurrentState({
+      conversationId: conversacion.id,
+      telefono: usuario.telefono,
+      channel: 'web',
+      state: refreshedState,
+      user: usuario,
+      attachment: input.attachment,
+      declaredPrestacionCodigo: selectedPrestacion || null,
+    })
+  }
 }
 
 export async function processKapsoInboundMessage(payload: KapsoWebhookPayload): Promise<void> {
@@ -782,10 +1227,10 @@ export async function processKapsoInboundMessage(payload: KapsoWebhookPayload): 
     'SELECT * FROM usuarios WHERE telefono = $1',
     [normalized.telefono],
   )
-  const conversacion = await ensureWhatsappConversation(usuario?.id ?? null, normalized.telefono)
+  const conversacion = await ensureConversation(usuario?.id ?? null, normalized.telefono, 'whatsapp')
   const isapreId = usuario ? await getUserPrimaryIsapre(usuario.id) : null
 
-  await logWhatsappMessage({
+  await logConversationMessage({
     conversacionId: conversacion.id,
     direccion: 'entrante',
     tipo: normalized.messageType === 'unknown' ? 'text' : normalized.messageType,
@@ -847,6 +1292,7 @@ export async function processKapsoInboundMessage(payload: KapsoWebhookPayload): 
     await startConversationMenu({
       conversationId: conversacion.id,
       telefono: normalized.telefono,
+      channel: 'whatsapp',
       user: usuario,
       isapreId,
     })
@@ -867,6 +1313,7 @@ export async function processKapsoInboundMessage(payload: KapsoWebhookPayload): 
       await handlePrestacionSelection({
         conversationId: conversacion.id,
         telefono: normalized.telefono,
+        channel: 'whatsapp',
         state: ensuredState,
         user: usuario,
         selectedRaw: normalizedInput,
@@ -876,6 +1323,7 @@ export async function processKapsoInboundMessage(payload: KapsoWebhookPayload): 
       await handleFieldFlow({
         conversationId: conversacion.id,
         telefono: normalized.telefono,
+        channel: 'whatsapp',
         state: ensuredState,
         text: normalizedInput,
         user: usuario,
@@ -900,8 +1348,8 @@ export async function processKapsoOutboundEvent(eventName: string, payload: Kaps
     'SELECT * FROM usuarios WHERE telefono = $1',
     [telefono],
   )
-  const conversacion = await ensureWhatsappConversation(usuario?.id ?? null, telefono)
-  await logWhatsappMessage({
+  const conversacion = await ensureConversation(usuario?.id ?? null, telefono, 'whatsapp')
+  await logConversationMessage({
     conversacionId: conversacion.id,
     direccion: 'sistema',
     tipo: 'system',

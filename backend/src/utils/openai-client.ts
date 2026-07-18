@@ -2,9 +2,17 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim()
 const OPENAI_MODEL = process.env.OPENAI_MODEL?.trim() || 'gpt-4.1-mini'
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL?.trim() || 'https://api.openai.com/v1'
 
-interface OpenAIMessage {
+interface OpenAITextMessage {
   role: 'system' | 'user'
   content: string
+}
+
+type OpenAIMessage = OpenAITextMessage | {
+  role: 'system' | 'user'
+  content: Array<
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  >
 }
 
 async function callOpenAI(messages: OpenAIMessage[]): Promise<string | null> {
@@ -102,6 +110,64 @@ export async function extractFieldValueWithAI(input: {
   ])
 
   return safeParseJson<{ valid: boolean; normalizedValue: string | null; reason?: string }>(message)
+}
+
+export async function extractBoletaDataWithAI(input: {
+  mimeType: string
+  base64Data: string
+  prestacionHint?: string | null
+}): Promise<{
+  prestacionSugerida: string | null
+  resumen: string
+  campos: {
+    centroMedicoRut?: string | null
+    centroMedicoNombre?: string | null
+    fechaAtencion?: string | null
+    montoPagado?: string | null
+    numeroBoleta?: string | null
+    rutProfesional?: string | null
+    tipoPago?: string | null
+    observaciones?: string | null
+  }
+  confianza?: string
+  faltantes?: string[]
+} | null> {
+  const dataUrl = `data:${input.mimeType};base64,${input.base64Data}`
+  const message = await callOpenAI([
+    {
+      role: 'system',
+      content: [
+        { type: 'text', text: [
+          'Eres un extractor estricto de datos de boletas/vouchers médicos chilenos para reembolsos de Isapre.',
+          'Debes responder JSON con esta forma exacta:',
+          '{"prestacionSugerida": string|null, "resumen": string, "campos": {"centroMedicoRut": string|null, "centroMedicoNombre": string|null, "fechaAtencion": string|null, "montoPagado": string|null, "numeroBoleta": string|null, "rutProfesional": string|null, "tipoPago": string|null, "observaciones": string|null}, "confianza": string, "faltantes": string[]}.',
+          'Usa YYYY-MM-DD para fechaAtencion y solo digitos para montoPagado.',
+          'Si el documento parece una boleta ambulatoria o voucher de atención, sugiere una prestación probable entre: urgencias_medicas, consultas_psicologia, examenes_y_otros, optica_kine_fono.',
+          'Si no puedes inferir con claridad, usa prestacionSugerida = null.',
+          'No inventes campos; cuando no existan, usa null.',
+          input.prestacionHint ? `Pista de prestación declarada por el usuario: ${input.prestacionHint}.` : '',
+        ].filter(Boolean).join(' ') },
+        { type: 'image_url', image_url: { url: dataUrl } },
+      ],
+    },
+  ])
+
+  return safeParseJson<{
+    prestacionSugerida: string | null
+    resumen: string
+    campos: {
+      centroMedicoRut?: string | null
+      centroMedicoNombre?: string | null
+      fechaAtencion?: string | null
+      montoPagado?: string | null
+      numeroBoleta?: string | null
+      rutProfesional?: string | null
+      tipoPago?: string | null
+      observaciones?: string | null
+    }
+    confianza?: string
+    faltantes?: string[]
+  }>(message)
 }
 
 export function hasOpenAIConfig(): boolean {

@@ -24,6 +24,7 @@ export type EstadoProcesoDemo = 'pendiente' | 'en_progreso' | 'completado' | 'fa
 export type DireccionMensaje = 'entrante' | 'saliente' | 'sistema'
 export type TipoMensajeWhatsapp = 'text' | 'image' | 'interactive' | 'document' | 'audio' | 'system'
 export type EtapaConversacion = 'idle' | 'awaiting_prestacion' | 'awaiting_field' | 'processing' | 'completed'
+export type CanalConversacion = 'whatsapp' | 'web'
 
 export interface Usuario {
   id: number
@@ -91,7 +92,7 @@ export interface ConversacionWhatsapp {
   id: number
   usuario_id: number | null
   telefono: string
-  canal: string
+  canal: CanalConversacion
   created_at: string
   updated_at: string
 }
@@ -104,6 +105,21 @@ export interface MensajeWhatsapp {
   contenido: string | null
   metadata: Record<string, unknown>
   created_at: string
+}
+
+export interface ArchivoConversacion {
+  id: number
+  conversacion_id: number
+  usuario_id: number | null
+  proceso_demo_id: number | null
+  nombre_archivo: string
+  mime_type: string
+  tamano_bytes: number | null
+  contenido_base64: string
+  extracted_data: Record<string, unknown>
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
 }
 
 export interface PrestacionCatalogo {

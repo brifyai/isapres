@@ -4,12 +4,17 @@ import { query, queryOne } from '../db.js'
 import { requireAuth } from '../middleware/auth.js'
 import type {
   ApiResponse,
+  ArchivoConversacion,
   EstadoConversacion,
   MensajeWhatsapp,
   PrestacionCatalogo,
   ProcesoDemo,
 } from '../types.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import {
+  getConversationSnapshotByChannel,
+  processWebConversationMessage,
+} from '../utils/conversation-engine.js'
 import {
   createBanmedicaDemoProcess,
   getDemoOverview,
@@ -28,6 +33,24 @@ const createBanmedicaSchema = z.object({
   montoPagado: z.number().int().nonnegative('El monto pagado debe ser positivo'),
   observaciones: z.string().max(500).optional().default(''),
 })
+
+const conversationQuerySchema = z.object({
+  canal: z.enum(['web', 'whatsapp']).optional().default('web'),
+})
+
+const webMessageSchema = z.object({
+  text: z.string().max(2000).optional().default(''),
+  prestacionCodigo: z.string().max(120).optional().nullable(),
+  attachment: z.object({
+    fileName: z.string().min(1).max(255),
+    mimeType: z.string().min(3).max(120),
+    base64Data: z.string().min(20),
+    sizeBytes: z.number().int().nonnegative().optional().nullable(),
+  }).optional().nullable(),
+}).refine(
+  (value) => Boolean(value.text.trim() || value.prestacionCodigo || value.attachment),
+  { message: 'Debes enviar un mensaje, una prestación o un adjunto.' },
+)
 
 router.get('/overview', asyncHandler(async (req, res) => {
   const userId = (req as Request & { userId?: number }).userId
@@ -77,80 +100,74 @@ router.get('/procesos/:id', asyncHandler(async (req, res) => {
 
 router.get('/conversacion', asyncHandler(async (req, res) => {
   const userId = (req as Request & { userId?: number }).userId
-  const usuario = await queryOne<{ id: number; telefono: string }>(
-    'SELECT id, telefono FROM usuarios WHERE id = $1',
-    [userId],
-  )
-
-  if (!usuario) {
-    const response: ApiResponse<null> = { success: false, error: 'Usuario no encontrado' }
-    res.status(404).json(response)
+  const parsedQuery = conversationQuerySchema.safeParse(req.query)
+  if (!parsedQuery.success) {
+    const response: ApiResponse<null> = { success: false, error: 'Canal de conversación inválido' }
+    res.status(400).json(response)
     return
   }
 
-  const conversacion = await queryOne<{ id: number }>(
-    'SELECT id FROM conversaciones_whatsapp WHERE usuario_id = $1 ORDER BY updated_at DESC LIMIT 1',
-    [usuario.id],
-  )
-
-  if (!conversacion) {
-    const response: ApiResponse<{
-      state: EstadoConversacion | null
-      messages: MensajeWhatsapp[]
-      prestaciones: PrestacionCatalogo[]
-    }> = {
-      success: true,
-      data: {
-        state: null,
-        messages: [],
-        prestaciones: [],
-      },
-    }
-    res.json(response)
-    return
-  }
-
-  const state = await queryOne<EstadoConversacion>(
-    'SELECT * FROM estado_conversaciones WHERE conversacion_id = $1',
-    [conversacion.id],
-  )
-
-  const messages = await query<MensajeWhatsapp>(
-    `
-      SELECT *
-      FROM mensajes_whatsapp
-      WHERE conversacion_id = $1
-      ORDER BY created_at DESC
-      LIMIT 30
-    `,
-    [conversacion.id],
-  )
-
-  const prestaciones = state?.isapre_id
-    ? await query<PrestacionCatalogo>(
-        `
-          SELECT *
-          FROM catalogo_prestaciones
-          WHERE isapre_id = $1::isapre_id AND activa = true
-          ORDER BY orden ASC
-        `,
-        [state.isapre_id],
-      )
-    : []
+  const snapshot = await getConversationSnapshotByChannel(userId as number, parsedQuery.data.canal)
 
   const response: ApiResponse<{
+    channel: 'web' | 'whatsapp'
     state: EstadoConversacion | null
     messages: MensajeWhatsapp[]
     prestaciones: PrestacionCatalogo[]
+    attachments: ArchivoConversacion[]
   }> = {
     success: true,
     data: {
-      state: state ?? null,
-      messages,
-      prestaciones,
+      channel: parsedQuery.data.canal,
+      state: snapshot.state,
+      messages: snapshot.messages,
+      prestaciones: snapshot.prestaciones,
+      attachments: snapshot.attachments,
     },
   }
   res.json(response)
+}))
+
+router.post('/conversacion/web/message', asyncHandler(async (req, res) => {
+  const userId = (req as Request & { userId?: number }).userId
+  const body = webMessageSchema.safeParse(req.body)
+
+  if (!body.success) {
+    const response: ApiResponse<null> = {
+      success: false,
+      error: body.error.errors[0]?.message ?? 'Payload inválido',
+    }
+    res.status(400).json(response)
+    return
+  }
+
+  await processWebConversationMessage({
+    userId: userId as number,
+    text: body.data.text,
+    prestacionCodigo: body.data.prestacionCodigo,
+    attachment: body.data.attachment ?? null,
+  })
+
+  const snapshot = await getConversationSnapshotByChannel(userId as number, 'web')
+  const response: ApiResponse<{
+    channel: 'web'
+    state: EstadoConversacion | null
+    messages: MensajeWhatsapp[]
+    prestaciones: PrestacionCatalogo[]
+    attachments: ArchivoConversacion[]
+  }> = {
+    success: true,
+    data: {
+      channel: 'web',
+      state: snapshot.state,
+      messages: snapshot.messages,
+      prestaciones: snapshot.prestaciones,
+      attachments: snapshot.attachments,
+    },
+    message: 'Mensaje web procesado correctamente',
+  }
+
+  res.status(201).json(response)
 }))
 
 router.post('/banmedica/urgencia', asyncHandler(async (req, res) => {
