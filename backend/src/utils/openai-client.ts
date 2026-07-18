@@ -118,6 +118,7 @@ export async function extractBoletaDataWithAI(input: {
   prestacionHint?: string | null
 }): Promise<{
   prestacionSugerida: string | null
+  tipoDocumentoSugerido: string | null
   resumen: string
   campos: {
     centroMedicoRut?: string | null
@@ -125,6 +126,8 @@ export async function extractBoletaDataWithAI(input: {
     fechaAtencion?: string | null
     montoPagado?: string | null
     numeroBoleta?: string | null
+    numeroComercio?: string | null
+    numeroOperacion?: string | null
     rutProfesional?: string | null
     tipoPago?: string | null
     observaciones?: string | null
@@ -140,9 +143,13 @@ export async function extractBoletaDataWithAI(input: {
         { type: 'text', text: [
           'Eres un extractor estricto de datos de boletas/vouchers médicos chilenos para reembolsos de Isapre.',
           'Debes responder JSON con esta forma exacta:',
-          '{"prestacionSugerida": string|null, "resumen": string, "campos": {"centroMedicoRut": string|null, "centroMedicoNombre": string|null, "fechaAtencion": string|null, "montoPagado": string|null, "numeroBoleta": string|null, "rutProfesional": string|null, "tipoPago": string|null, "observaciones": string|null}, "confianza": string, "faltantes": string[]}.',
+          '{"prestacionSugerida": string|null, "tipoDocumentoSugerido": string|null, "resumen": string, "campos": {"centroMedicoRut": string|null, "centroMedicoNombre": string|null, "fechaAtencion": string|null, "montoPagado": string|null, "numeroBoleta": string|null, "numeroComercio": string|null, "numeroOperacion": string|null, "rutProfesional": string|null, "tipoPago": string|null, "observaciones": string|null}, "confianza": string, "faltantes": string[]}.',
           'Usa YYYY-MM-DD para fechaAtencion y solo digitos para montoPagado.',
           'Si el documento parece una boleta ambulatoria o voucher de atención, sugiere una prestación probable entre: urgencias_medicas, consultas_psicologia, examenes_y_otros, optica_kine_fono.',
+          'Si puedes inferir el tipo de documento de Banmédica para consultas, usa uno de estos códigos exactos: boleta_honorarios_electronica, otras_boletas_facturas, voucher_tarjeta.',
+          'Usa tipoDocumentoSugerido = voucher_tarjeta cuando el documento sea claramente un voucher, comprobante POS o pago con tarjeta.',
+          'Usa tipoDocumentoSugerido = boleta_honorarios_electronica cuando el documento sea una boleta de honorarios electrónica de un profesional.',
+          'Usa tipoDocumentoSugerido = otras_boletas_facturas cuando sea una boleta/factura clínica o prestador institucional y no una boleta de honorarios.',
           'Si no puedes inferir con claridad, usa prestacionSugerida = null.',
           'No inventes campos; cuando no existan, usa null.',
           input.prestacionHint ? `Pista de prestación declarada por el usuario: ${input.prestacionHint}.` : '',
@@ -154,6 +161,7 @@ export async function extractBoletaDataWithAI(input: {
 
   return safeParseJson<{
     prestacionSugerida: string | null
+    tipoDocumentoSugerido: string | null
     resumen: string
     campos: {
       centroMedicoRut?: string | null
@@ -161,6 +169,8 @@ export async function extractBoletaDataWithAI(input: {
       fechaAtencion?: string | null
       montoPagado?: string | null
       numeroBoleta?: string | null
+      numeroComercio?: string | null
+      numeroOperacion?: string | null
       rutProfesional?: string | null
       tipoPago?: string | null
       observaciones?: string | null

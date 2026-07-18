@@ -389,12 +389,12 @@ values
     'banmedica',
     'consultas_psicologia',
     'Consultas Médicas y Atenciones Psicológicas',
-    'Prestación que hoy requiere adjuntar voucher o boleta.',
-    false,
+    'Prestación guiada con selección de tipo de comprobante, carga de archivos y paso 3 de datos/documentos.',
+    true,
     true,
     true,
     1,
-    '{"tipo_demo":"adjuntos"}'::jsonb
+    '{"tipo_demo":"consultas_guiadas"}'::jsonb
   ),
   (
     'banmedica',
@@ -546,6 +546,143 @@ cross join (
 ) as data(campo_key, label, tipo, placeholder, ayuda, requerido, orden, metadata)
 where cp.isapre_id = 'banmedica'
   and cp.codigo = 'urgencias_medicas'
+on conflict (prestacion_id, campo_key) do update set
+  label = excluded.label,
+  tipo = excluded.tipo,
+  placeholder = excluded.placeholder,
+  ayuda = excluded.ayuda,
+  requerido = excluded.requerido,
+  orden = excluded.orden,
+  metadata = excluded.metadata,
+  updated_at = timezone('utc', now());
+
+insert into public.catalogo_campos_prestacion (
+  prestacion_id,
+  campo_key,
+  label,
+  tipo,
+  placeholder,
+  ayuda,
+  requerido,
+  orden,
+  metadata
+)
+select
+  cp.id,
+  data.campo_key,
+  data.label,
+  data.tipo,
+  data.placeholder,
+  data.ayuda,
+  data.requerido,
+  data.orden,
+  data.metadata
+from public.catalogo_prestaciones cp
+cross join (
+  values
+    (
+      'tipo_documento_pago',
+      'Tipo de documento',
+      'select',
+      'Selecciona el tipo de comprobante',
+      'Elige entre boleta de honorarios electrónica, otras boletas/facturas o voucher con tarjeta.',
+      true,
+      1,
+      '{"opciones":[{"value":"boleta_honorarios_electronica","label":"Boleta de honorarios electrónica"},{"value":"otras_boletas_facturas","label":"Otras boletas o facturas"},{"value":"voucher_tarjeta","label":"Voucher o comprobante de pago con tarjeta"}]}'::jsonb
+    ),
+    (
+      'rut_profesional',
+      'RUT del médico',
+      'rut',
+      'Ej: 18.466.194-2',
+      'RUT del médico o profesional que aparece en el documento.',
+      false,
+      2,
+      '{"validacion":"rut"}'::jsonb
+    ),
+    (
+      'centro_medico_rut',
+      'RUT del centro médico',
+      'rut',
+      'Ej: 77.292.040-8',
+      'RUT del centro médico o prestador institucional.',
+      false,
+      3,
+      '{"validacion":"rut"}'::jsonb
+    ),
+    (
+      'numero_comercio',
+      'Número de comercio',
+      'text',
+      'Ej: 7340991',
+      'Número de comercio o identificador visible del comprobante.',
+      false,
+      4,
+      '{}'::jsonb
+    ),
+    (
+      'numero_operacion',
+      'Número de operación',
+      'text',
+      'Ej: 1442467',
+      'Número de operación del voucher o transacción.',
+      false,
+      5,
+      '{}'::jsonb
+    ),
+    (
+      'numero_boleta',
+      'Número de boleta',
+      'text',
+      'Ej: 7340991',
+      'Número de boleta cuando el documento sea boleta o factura.',
+      false,
+      6,
+      '{}'::jsonb
+    ),
+    (
+      'monto_pagado',
+      'Monto',
+      'number',
+      'Ej: 37983',
+      'Monto total pagado indicado en el documento.',
+      true,
+      7,
+      '{"validacion":"number"}'::jsonb
+    ),
+    (
+      'fecha_atencion',
+      'Fecha',
+      'date',
+      'YYYY-MM-DD',
+      'Fecha de atención o emisión del comprobante.',
+      true,
+      8,
+      '{"validacion":"date"}'::jsonb
+    ),
+    (
+      'tipo_pago',
+      'Tipo de pago',
+      'text',
+      'Ej: tarjeta',
+      'Tipo de pago visible o inferido en el comprobante.',
+      false,
+      9,
+      '{}'::jsonb
+    ),
+    (
+      'observaciones',
+      'Observaciones',
+      'text',
+      'Contexto adicional',
+      'Notas opcionales sobre la prestación o el documento.',
+      false,
+      10,
+      '{}'::jsonb
+    )
+) as data(campo_key, label, tipo, placeholder, ayuda, requerido, orden, metadata)
+where cp.isapre_id = 'banmedica'
+  and cp.codigo = 'consultas_psicologia'
 on conflict (prestacion_id, campo_key) do update set
   label = excluded.label,
   tipo = excluded.tipo,

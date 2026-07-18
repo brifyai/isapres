@@ -1,3 +1,6 @@
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { BaseScraper } from '../base-scraper.js'
 import type {
   CredencialesDescifradas,
@@ -32,9 +35,44 @@ interface BanmedicaDemoForm {
   observaciones: string
 }
 
+interface BanmedicaConsultasAttachment {
+  role: 'voucher' | 'detalle' | 'orden_medica' | 'boleta' | 'otro'
+  fileName: string
+  mimeType: string
+  base64Data: string
+}
+
+interface BanmedicaConsultasForm {
+  tipoDocumentoPago: 'boleta_honorarios_electronica' | 'otras_boletas_facturas' | 'voucher_tarjeta'
+  rutProfesional: string
+  centroMedicoRut: string
+  numeroComercio: string
+  numeroOperacion: string
+  numeroBoleta: string
+  montoPagado: string
+  fechaAtencion: string
+  tipoPago: string
+  observaciones: string
+  attachments: BanmedicaConsultasAttachment[]
+}
+
 export class BanmedicaScraper extends BaseScraper {
   constructor() {
     super(banmedicaConfig)
+  }
+
+  async procesarDemoPrestacion(
+    task: ProcesoDemoTask,
+    credenciales: CredencialesDescifradas,
+    ctx: DemoExecutionContext,
+  ): Promise<ResultadoReembolso> {
+    const prestacionCodigo = String(task.metadata?.prestacionCodigo ?? '')
+
+    if (prestacionCodigo === 'consultas_psicologia') {
+      return this.procesarDemoConsultas(task, credenciales, ctx)
+    }
+
+    return this.procesarDemoUrgencia(task, credenciales, ctx)
   }
 
   override async login(credenciales: CredencialesDescifradas): Promise<boolean> {
@@ -134,6 +172,77 @@ export class BanmedicaScraper extends BaseScraper {
     }
   }
 
+  async procesarDemoConsultas(
+    task: ProcesoDemoTask,
+    credenciales: CredencialesDescifradas,
+    ctx: DemoExecutionContext,
+  ): Promise<ResultadoReembolso> {
+    const form = this.normalizeConsultasForm(task)
+
+    try {
+      await this.launchBrowser()
+      await ctx.recordStep({
+        etapa: 'login',
+        accion: 'abrir_login',
+        detalle: 'Ingreso a la sucursal virtual Banmedica para Consultas Médicas',
+        url: this.config.urlLogin,
+        status: 'info',
+      })
+
+      const loginOk = await this.login(credenciales)
+      await ctx.recordStep({
+        etapa: 'login',
+        accion: 'resultado_login',
+        detalle: loginOk ? 'Login exitoso en Banmedica' : 'Login fallido en Banmedica',
+        url: this.page?.url(),
+        status: loginOk ? 'success' : 'error',
+      })
+
+      if (!loginOk || !this.page) {
+        await this.closeBrowser()
+        return {
+          success: false,
+          error: 'No se pudo iniciar sesion en Banmedica.',
+        }
+      }
+
+      await this.navigateToPrestacion('Consultas Médicas y Atenciones Psicológicas', ctx)
+      await this.selectDocumentTypeAndStartNewClaim(form, ctx)
+      await this.discoverVisibleFields(ctx)
+      await this.fillConsultasForm(form, ctx)
+      await this.uploadConsultasAttachments(form, ctx)
+
+      await ctx.recordStep({
+        etapa: 'finalizacion',
+        accion: 'datos_documentos_listos',
+        detalle: 'Paso 3 de Datos y documentos alcanzado y completado sin continuar al envío final',
+        url: this.page.url(),
+        status: 'success',
+      })
+
+      await this.closeBrowser()
+
+      return {
+        success: true,
+        folioIsapre: 'DEMO-CONSULTAS-SIN-ENVIO',
+      }
+    } catch (error) {
+      await ctx.recordStep({
+        etapa: 'error',
+        accion: 'proceso_fallido',
+        detalle: error instanceof Error ? error.message : 'Fallo inesperado en Consultas Banmedica',
+        url: this.page?.url(),
+        status: 'error',
+      }).catch(() => undefined)
+
+      await this.closeBrowser()
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Error inesperado en el demo de Consultas Banmedica',
+      }
+    }
+  }
+
   private normalizeForm(task: ProcesoDemoTask): BanmedicaDemoForm {
     const formulario = task.metadata?.formulario ?? {}
 
@@ -149,7 +258,39 @@ export class BanmedicaScraper extends BaseScraper {
     }
   }
 
+  private normalizeConsultasForm(task: ProcesoDemoTask): BanmedicaConsultasForm {
+    const formulario = task.metadata?.formulario ?? {}
+    const attachments = Array.isArray(task.metadata?.attachments)
+      ? task.metadata.attachments as Array<Record<string, unknown>>
+      : []
+
+    return {
+      tipoDocumentoPago: this.normalizeDocumentType(String(formulario.tipo_documento_pago ?? 'otras_boletas_facturas')),
+      rutProfesional: String(formulario.rut_profesional ?? ''),
+      centroMedicoRut: String(formulario.centro_medico_rut ?? ''),
+      numeroComercio: String(formulario.numero_comercio ?? ''),
+      numeroOperacion: String(formulario.numero_operacion ?? ''),
+      numeroBoleta: String(formulario.numero_boleta ?? ''),
+      montoPagado: String(formulario.monto_pagado ?? ''),
+      fechaAtencion: String(formulario.fecha_atencion ?? ''),
+      tipoPago: String(formulario.tipo_pago ?? 'tarjeta'),
+      observaciones: String(formulario.observaciones ?? ''),
+      attachments: attachments
+        .map((attachment) => ({
+          role: this.normalizeAttachmentRole(String(attachment.role ?? 'voucher')),
+          fileName: String(attachment.fileName ?? `archivo-${attachment.id ?? 'demo'}`),
+          mimeType: String(attachment.mimeType ?? 'application/octet-stream'),
+          base64Data: String(attachment.base64Data ?? ''),
+        }))
+        .filter((attachment) => attachment.base64Data.length > 0),
+    }
+  }
+
   private async navigateToUrgencias(ctx: DemoExecutionContext): Promise<void> {
+    await this.navigateToPrestacion('Urgencias Médicas', ctx)
+  }
+
+  private async navigateToPrestacion(prestacionLabel: string, ctx: DemoExecutionContext): Promise<void> {
     if (!this.page) {
       throw new Error('Pagina no inicializada')
     }
@@ -200,7 +341,7 @@ export class BanmedicaScraper extends BaseScraper {
 
     await this.page.waitForTimeout(2000)
     await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => undefined)
-    await this.selectPrestacionCard(['Urgencias Médicas', 'Urgencias Medicas'], ctx)
+    await this.selectPrestacionCard([prestacionLabel, prestacionLabel.replace('é', 'e').replace('á', 'a')], ctx)
   }
 
   private async selectPrestacionCard(labels: string[], ctx: DemoExecutionContext): Promise<void> {
@@ -228,7 +369,7 @@ export class BanmedicaScraper extends BaseScraper {
       await ctx.recordStep({
         etapa: 'navegacion',
         accion: 'click',
-        detalle: 'Elegir prestacion Urgencias Medicas',
+        detalle: `Elegir prestación ${labels[0]}`,
         selector: '.option-box',
         url: this.page.url(),
         status: 'success',
@@ -239,7 +380,7 @@ export class BanmedicaScraper extends BaseScraper {
       return
     }
 
-    throw new Error('No se encontro el elemento requerido: Elegir prestacion Urgencias Medicas')
+    throw new Error(`No se encontro el elemento requerido: Elegir prestación ${labels[0]}`)
   }
 
   private async openReembolsosMenu(ctx: DemoExecutionContext): Promise<boolean> {
@@ -518,6 +659,292 @@ export class BanmedicaScraper extends BaseScraper {
     )
   }
 
+  private normalizeDocumentType(value: string): BanmedicaConsultasForm['tipoDocumentoPago'] {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'boleta_honorarios_electronica') return normalized
+    if (normalized === 'voucher_tarjeta') return normalized
+    return 'otras_boletas_facturas'
+  }
+
+  private normalizeAttachmentRole(value: string): BanmedicaConsultasAttachment['role'] {
+    if (value === 'detalle' || value === 'orden_medica' || value === 'boleta' || value === 'otro') {
+      return value
+    }
+    return 'voucher'
+  }
+
+  private getDocumentTypeLabel(value: BanmedicaConsultasForm['tipoDocumentoPago']): string {
+    switch (value) {
+      case 'boleta_honorarios_electronica':
+        return 'Boleta de honorarios electrónica'
+      case 'voucher_tarjeta':
+        return 'Voucher o comprobante de pago con tarjeta'
+      default:
+        return 'Otras boletas o facturas'
+    }
+  }
+
+  private async selectDocumentTypeAndStartNewClaim(form: BanmedicaConsultasForm, ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      throw new Error('Pagina no inicializada')
+    }
+
+    const documentLabel = this.getDocumentTypeLabel(form.tipoDocumentoPago)
+    const optionCards = this.page.locator('.option')
+    const totalCards = await optionCards.count()
+
+    for (let index = 0; index < totalCards; index += 1) {
+      const card = optionCards.nth(index)
+      const text = (await card.textContent())?.replace(/\s+/g, ' ').trim() ?? ''
+      if (!text.includes(documentLabel)) {
+        continue
+      }
+
+      await card.scrollIntoViewIfNeeded().catch(() => undefined)
+      await card.click({ timeout: 10000 }).catch(async () => {
+        await card.click({ force: true, timeout: 10000 })
+      })
+      await this.page.waitForTimeout(1200)
+      await ctx.recordStep({
+        etapa: 'navegacion',
+        accion: 'click',
+        detalle: `Seleccionar tipo de comprobante: ${documentLabel}`,
+        selector: '.option',
+        url: this.page.url(),
+        status: 'success',
+        payload: {
+          matchedText: text,
+        },
+      })
+      break
+    }
+
+    await this.safeClick([
+      'button:has-text("Nuevo Reembolso")',
+      'text=Nuevo Reembolso',
+    ], 'Iniciar Nuevo Reembolso', ctx)
+
+    await this.page.waitForTimeout(1800)
+  }
+
+  private async fillConsultasForm(form: BanmedicaConsultasForm, ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      throw new Error('Pagina no inicializada')
+    }
+
+    await this.tryFill(
+      [
+        'input[placeholder*="RUT del médico"]',
+        'input[placeholder*="RUT del medico"]',
+        'input[formcontrolname*="medic"]',
+      ],
+      form.rutProfesional,
+      {
+        campoKey: 'rut_profesional',
+        label: 'RUT del médico',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="RUT del centro médico"]',
+        'input[placeholder*="RUT del centro medico"]',
+        '#rutMedicalCenter',
+      ],
+      form.centroMedicoRut,
+      {
+        campoKey: 'centro_medico_rut',
+        label: 'RUT del centro médico',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="Número de comercio"]',
+        'input[placeholder*="Numero de comercio"]',
+      ],
+      form.numeroComercio,
+      {
+        campoKey: 'numero_comercio',
+        label: 'Número de comercio',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="Número de operación"]',
+        'input[placeholder*="Numero de operación"]',
+        'input[placeholder*="Numero de operacion"]',
+      ],
+      form.numeroOperacion,
+      {
+        campoKey: 'numero_operacion',
+        label: 'Número de operación',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="Número de boleta"]',
+        'input[placeholder*="Numero de boleta"]',
+      ],
+      form.numeroBoleta,
+      {
+        campoKey: 'numero_boleta',
+        label: 'Número de boleta',
+        tipo: 'text',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder*="Monto"]',
+        '#monto',
+      ],
+      form.montoPagado,
+      {
+        campoKey: 'monto_pagado',
+        label: 'Monto',
+        tipo: 'number',
+      },
+      ctx,
+    )
+
+    await this.tryFill(
+      [
+        'input[placeholder="Fecha"]',
+        'input[placeholder*="Fecha"]',
+      ],
+      form.fechaAtencion,
+      {
+        campoKey: 'fecha_atencion',
+        label: 'Fecha',
+        tipo: 'date',
+      },
+      ctx,
+    )
+
+    await this.trySelectNg(
+      [
+        'ng-select',
+        '.ng-select',
+      ],
+      form.tipoPago,
+      {
+        campoKey: 'tipo_pago',
+        label: 'Tipo de pago',
+        tipo: 'select',
+      },
+      ctx,
+    )
+  }
+
+  private async uploadConsultasAttachments(form: BanmedicaConsultasForm, ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      throw new Error('Pagina no inicializada')
+    }
+
+    const voucher = form.attachments.find((attachment) => attachment.role === 'voucher' || attachment.role === 'boleta')
+    const detail = form.attachments.find((attachment) => attachment.role === 'detalle' || attachment.role === 'orden_medica')
+
+    if (voucher) {
+      await this.uploadAttachmentToInput(
+        'input[type="file"]',
+        0,
+        voucher,
+        'Adjuntar voucher/boleta principal',
+        ctx,
+      )
+    }
+
+    if (detail) {
+      await this.uploadAttachmentToInput(
+        'input[type="file"]',
+        1,
+        detail,
+        'Adjuntar detalle u orden médica',
+        ctx,
+      )
+    } else {
+      await ctx.recordStep({
+        etapa: 'adjuntos',
+        accion: 'adjunto_opcional_omitido',
+        detalle: 'No se recibió archivo de detalle u orden médica para esta ejecución demo',
+        url: this.page.url(),
+        status: 'warning',
+      })
+    }
+  }
+
+  private async uploadAttachmentToInput(
+    selector: string,
+    index: number,
+    attachment: BanmedicaConsultasAttachment,
+    detail: string,
+    ctx: DemoExecutionContext,
+  ): Promise<void> {
+    if (!this.page) {
+      return
+    }
+
+    const input = this.page.locator(selector).nth(index)
+    if (await input.count() === 0) {
+      await ctx.recordStep({
+        etapa: 'adjuntos',
+        accion: 'upload_skip',
+        detalle: `${detail}: input file no encontrado`,
+        url: this.page.url(),
+        status: 'warning',
+      })
+      return
+    }
+
+    const extension = this.getFileExtension(attachment.fileName, attachment.mimeType)
+    const tempFilePath = path.join(os.tmpdir(), `wsp-isap-${Date.now()}-${index}${extension}`)
+    await fs.writeFile(tempFilePath, Buffer.from(attachment.base64Data, 'base64'))
+
+    try {
+      await input.setInputFiles(tempFilePath)
+      await this.page.waitForTimeout(1200)
+      await ctx.recordStep({
+        etapa: 'adjuntos',
+        accion: 'upload',
+        detalle: detail,
+        selector: `${selector}:nth(${index})`,
+        url: this.page.url(),
+        status: 'success',
+        payload: {
+          fileName: attachment.fileName,
+          role: attachment.role,
+        },
+      })
+    } finally {
+      await fs.unlink(tempFilePath).catch(() => undefined)
+    }
+  }
+
+  private getFileExtension(fileName: string, mimeType: string): string {
+    const currentExtension = path.extname(fileName)
+    if (currentExtension) {
+      return currentExtension
+    }
+
+    if (mimeType.includes('png')) return '.png'
+    if (mimeType.includes('jpeg') || mimeType.includes('jpg')) return '.jpg'
+    if (mimeType.includes('webp')) return '.webp'
+    if (mimeType.includes('pdf')) return '.pdf'
+    return '.bin'
+  }
+
   private async tryFill(
     selectors: string[],
     value: string,
@@ -530,6 +957,17 @@ export class BanmedicaScraper extends BaseScraper {
     ctx: DemoExecutionContext,
   ): Promise<boolean> {
     if (!this.page) {
+      return false
+    }
+
+    if (!value.trim()) {
+      await ctx.recordStep({
+        etapa: 'formulario',
+        accion: 'fill_omitido',
+        detalle: `Campo sin valor disponible: ${field.label}`,
+        url: this.page?.url(),
+        status: 'warning',
+      })
       return false
     }
 
@@ -588,6 +1026,17 @@ export class BanmedicaScraper extends BaseScraper {
       return false
     }
 
+    if (!value.trim()) {
+      await ctx.recordStep({
+        etapa: 'formulario',
+        accion: 'select_omitido',
+        detalle: `Campo sin valor disponible: ${field.label}`,
+        url: this.page?.url(),
+        status: 'warning',
+      })
+      return false
+    }
+
     for (const selector of selectors) {
       const locator = this.page.locator(selector).first()
       if (await locator.count()) {
@@ -623,6 +1072,79 @@ export class BanmedicaScraper extends BaseScraper {
           },
         })
         return true
+      }
+    }
+
+    await ctx.recordStep({
+      etapa: 'formulario',
+      accion: 'select_skip',
+      detalle: `Campo no encontrado: ${field.label}`,
+      url: this.page?.url(),
+      status: 'warning',
+    })
+    return false
+  }
+
+  private async trySelectNg(
+    selectors: string[],
+    value: string,
+    field: {
+      campoKey: string
+      label: string
+      tipo: string
+      requerido?: boolean
+    },
+    ctx: DemoExecutionContext,
+  ): Promise<boolean> {
+    if (!this.page) {
+      return false
+    }
+
+    if (!value.trim()) {
+      await ctx.recordStep({
+        etapa: 'formulario',
+        accion: 'select_omitido',
+        detalle: `Campo sin valor disponible: ${field.label}`,
+        url: this.page?.url(),
+        status: 'warning',
+      })
+      return false
+    }
+
+    for (const selector of selectors) {
+      const locator = this.page.locator(selector).first()
+      if (await locator.count()) {
+        await locator.click({ timeout: 10000 }).catch(async () => {
+          await locator.click({ force: true, timeout: 10000 })
+        })
+
+        const option = this.page.locator('.ng-dropdown-panel .ng-option').filter({ hasText: new RegExp(value, 'i') }).first()
+        const hasOption = await option.count().catch(() => 0)
+        if (hasOption) {
+          await option.click({ timeout: 10000 }).catch(async () => {
+            await option.click({ force: true, timeout: 10000 })
+          })
+          await ctx.upsertField({
+            campoKey: field.campoKey,
+            label: field.label,
+            tipo: field.tipo,
+            selector,
+            requerido: field.requerido,
+            valorIngresado: value,
+          })
+          await ctx.recordStep({
+            etapa: 'formulario',
+            accion: 'select',
+            detalle: `Campo seleccionado: ${field.label}`,
+            selector,
+            url: this.page.url(),
+            status: 'success',
+            payload: {
+              value,
+            },
+          })
+          return true
+        }
       }
     }
 

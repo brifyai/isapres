@@ -346,22 +346,22 @@ async function procesarProcesoDemo(task: ProcesoDemoTask): Promise<void> {
   try {
     const scraper = getScraper(task.isapre_id)
     const prestacionCodigo = String(task.metadata?.prestacionCodigo ?? '')
-    const isBanmedicaUrgencia =
+    const isBanmedicaDemo =
       task.isapre_id === 'banmedica'
-      && (prestacionCodigo === 'urgencias_medicas' || task.flujo === 'banmedica_urgencia_demo')
+      && ['urgencias_medicas', 'consultas_psicologia'].includes(prestacionCodigo)
 
-    if (!(scraper instanceof BanmedicaScraper) || !isBanmedicaUrgencia) {
+    if (!(scraper instanceof BanmedicaScraper) || !isBanmedicaDemo) {
       throw new Error('No existe un scraper demo configurado para este flujo')
     }
 
-    const result = await scraper.procesarDemoUrgencia(task, credenciales, {
+    const result = await scraper.procesarDemoPrestacion(task, credenciales, {
       recordStep: async (step) => recordProcesoStep(task.id, step),
       upsertField: async (field) => upsertProcesoField(task.id, field),
     })
 
     if (result.success) {
       await updateProcesoDemoEstado(task.id, 'completado', {
-        resumen: `Proceso ${task.metadata?.prestacionNombre ?? 'demo'} completado. Formulario identificado y llenado sin envio final.`,
+        resumen: `Proceso ${task.metadata?.prestacionNombre ?? 'demo'} completado. Navegación Banmédica registrada sin envío final.`,
       })
       console.log(`✅ Demo #${task.id}: completado`)
     } else {

@@ -122,6 +122,8 @@ export interface ArchivoConversacion {
   updated_at: string
 }
 
+export type RolAdjuntoConversacion = 'voucher' | 'detalle' | 'orden_medica' | 'boleta' | 'otro'
+
 export interface PrestacionCatalogo {
   id: number
   isapre_id: IsapreId

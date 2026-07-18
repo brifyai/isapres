@@ -10,6 +10,7 @@ import type {
   PrestacionCampoCatalogo,
   PrestacionCatalogo,
   ProcesoDemo,
+  RolAdjuntoConversacion,
   Usuario,
   WebhookEventLog,
 } from '../types.js'
@@ -53,6 +54,7 @@ interface WebConversationAttachmentInput {
   mimeType: string
   base64Data: string
   sizeBytes?: number | null
+  role?: RolAdjuntoConversacion
 }
 
 function normalizeText(value: string): string {
@@ -296,11 +298,35 @@ function buildAnswersFromExtraction(
   if (campos.fechaAtencion) answers.fecha_atencion = campos.fechaAtencion
   if (campos.montoPagado) answers.monto_pagado = campos.montoPagado
   if (campos.numeroBoleta) answers.numero_boleta = campos.numeroBoleta
+  if (campos.numeroComercio) answers.numero_comercio = campos.numeroComercio
+  if (campos.numeroOperacion) answers.numero_operacion = campos.numeroOperacion
   if (campos.rutProfesional) answers.rut_profesional = campos.rutProfesional
   if (campos.tipoPago) answers.tipo_pago = campos.tipoPago
+  if (extraction.tipoDocumentoSugerido) answers.tipo_documento_pago = extraction.tipoDocumentoSugerido
   if (campos.observaciones) answers.observaciones = campos.observaciones
 
   return answers
+}
+
+function getAttachmentRole(input: WebConversationAttachmentInput): RolAdjuntoConversacion {
+  return input.role ?? 'voucher'
+}
+
+function buildProcessAttachmentPayload(attachments: ArchivoConversacion[]): Array<Record<string, unknown>> {
+  return attachments.map((attachment) => ({
+    id: attachment.id,
+    role: attachment.metadata?.role ?? 'voucher',
+    fileName: attachment.nombre_archivo,
+    mimeType: attachment.mime_type,
+    sizeBytes: attachment.tamano_bytes,
+    base64Data: attachment.contenido_base64,
+    extractedData: attachment.extracted_data,
+    createdAt: attachment.created_at,
+  }))
+}
+
+function isConsultasPrestacion(prestacionCodigo: string): boolean {
+  return prestacionCodigo === 'consultas_psicologia'
 }
 
 function getNextPendingField(
@@ -308,6 +334,9 @@ function getNextPendingField(
   answers: Record<string, unknown>,
 ): PrestacionCampoCatalogo | null {
   return fields.find((field) => {
+    if (!field.requerido) {
+      return false
+    }
     const current = answers[field.campo_key]
     return typeof current !== 'string' || current.trim().length === 0
   }) ?? null
@@ -325,6 +354,7 @@ async function continueConversationWithAnswers(input: {
 }): Promise<void> {
   const fields = await getFieldsByPrestacion(input.prestacion.id)
   const nextField = getNextPendingField(fields, input.answers)
+  const conversationAttachments = await listConversationAttachments(input.conversationId, 20)
 
   if (nextField) {
     await upsertConversationState({
@@ -361,6 +391,9 @@ async function continueConversationWithAnswers(input: {
     requiereFormulario: input.prestacion.requiere_formulario,
     answers: input.answers,
     fieldDefinitions: fields,
+    extraMetadata: {
+      attachments: buildProcessAttachmentPayload(conversationAttachments),
+    },
   })
 
   await upsertConversationState({
@@ -405,6 +438,7 @@ async function processAttachmentForCurrentState(input: {
   declaredPrestacionCodigo?: string | null
 }): Promise<void> {
   const base64Data = sanitizeBase64Payload(input.attachment.base64Data)
+  const attachmentRole = getAttachmentRole(input.attachment)
 
   let prestacion = input.state.prestacion_id
     ? await getPrestacionById(input.state.prestacion_id)
@@ -416,7 +450,12 @@ async function processAttachmentForCurrentState(input: {
   }
 
   let extraction: Awaited<ReturnType<typeof extractBoletaDataWithAI>> = null
-  if (hasOpenAIConfig() && isImageMimeType(input.attachment.mimeType)) {
+  if (
+    attachmentRole !== 'detalle'
+    && attachmentRole !== 'orden_medica'
+    && hasOpenAIConfig()
+    && isImageMimeType(input.attachment.mimeType)
+  ) {
     extraction = await extractBoletaDataWithAI({
       mimeType: input.attachment.mimeType,
       base64Data,
@@ -435,6 +474,7 @@ async function processAttachmentForCurrentState(input: {
     extractedData: extraction ?? {},
     metadata: {
       channel: input.channel,
+      role: attachmentRole,
     },
   })
 
@@ -444,11 +484,12 @@ async function processAttachmentForCurrentState(input: {
       to: input.telefono,
       channel: input.channel,
       body: isImageMimeType(input.attachment.mimeType)
-        ? 'Adjunto recibido. No pude extraer datos útiles automáticamente desde la boleta.'
-        : 'Adjunto recibido. En esta fase demo la extracción automática está habilitada para imágenes PNG, JPG y WEBP.',
+        ? `Adjunto "${attachmentRole}" recibido. No pude extraer datos útiles automáticamente desde la imagen.`
+        : `Adjunto "${attachmentRole}" recibido. En esta fase demo la extracción automática está habilitada para imágenes PNG, JPG y WEBP.`,
       metadata: {
         attachmentId: attachmentRecord.id,
         attachmentName: attachmentRecord.nombre_archivo,
+        attachmentRole,
       },
     })
     return
@@ -469,6 +510,7 @@ async function processAttachmentForCurrentState(input: {
         : `Analicé tu boleta. ${extraction.resumen} Ahora confirma primero el tipo de prestación para continuar.`,
       metadata: {
         attachmentId: attachmentRecord.id,
+        attachmentRole,
         extraction,
       },
     })
@@ -487,6 +529,7 @@ async function processAttachmentForCurrentState(input: {
       body: `Boleta analizada para "${prestacion.nombre}". ${extraction.resumen} Esta prestación queda registrada y preparada para la fase de adjuntos, pero aún no ejecuta un flujo automático completo.`,
       metadata: {
         attachmentId: attachmentRecord.id,
+        attachmentRole,
         extraction,
         prestacionCodigo: prestacion.codigo,
       },
@@ -508,6 +551,7 @@ async function processAttachmentForCurrentState(input: {
     body: `Boleta analizada. ${extraction.resumen}`,
     metadata: {
       attachmentId: attachmentRecord.id,
+      attachmentRole,
       extraction,
       prestacionCodigo: prestacion.codigo,
     },
@@ -523,6 +567,7 @@ async function processAttachmentForCurrentState(input: {
     answers: mergedAnswers,
     metadata: {
       attachmentId: attachmentRecord.id,
+      attachmentRole,
       extractionSummary: extraction.resumen,
     },
   })
@@ -1068,7 +1113,7 @@ export async function processWebConversationMessage(input: {
   userId: number
   text?: string
   prestacionCodigo?: string | null
-  attachment?: WebConversationAttachmentInput | null
+  attachments?: WebConversationAttachmentInput[] | null
 }): Promise<void> {
   const usuario = await queryOne<Usuario>(
     'SELECT * FROM usuarios WHERE id = $1',
@@ -1098,24 +1143,33 @@ export async function processWebConversationMessage(input: {
   const selectedPrestacion = input.prestacionCodigo?.trim() ?? ''
   const normalizedInput = selectedPrestacion || trimmedText
   const command = normalizeText(trimmedText || normalizedInput)
+  const attachments = (input.attachments ?? [])
+    .filter((attachment) => attachment?.base64Data)
+    .sort((left, right) => {
+      const leftRole = getAttachmentRole(left)
+      const rightRole = getAttachmentRole(right)
+      const leftWeight = leftRole === 'voucher' || leftRole === 'boleta' ? 1 : 0
+      const rightWeight = rightRole === 'voucher' || rightRole === 'boleta' ? 1 : 0
+      return leftWeight - rightWeight
+    })
+  const primaryAttachment = attachments[0] ?? null
 
   await logConversationMessage({
     conversacionId: conversacion.id,
     direccion: 'entrante',
-    tipo: input.attachment
-      ? (input.attachment.mimeType.startsWith('image/') ? 'image' : 'document')
+    tipo: primaryAttachment
+      ? (primaryAttachment.mimeType.startsWith('image/') ? 'image' : 'document')
       : 'text',
-    contenido: normalizedInput || (input.attachment ? `[Adjunto] ${input.attachment.fileName}` : null),
+    contenido: normalizedInput || (primaryAttachment ? `[Adjunto] ${attachments.map((item) => item.fileName).join(', ')}` : null),
     metadata: {
       channel: 'web',
       prestacionCodigo: selectedPrestacion || null,
-      attachment: input.attachment
-        ? {
-            fileName: input.attachment.fileName,
-            mimeType: input.attachment.mimeType,
-            sizeBytes: input.attachment.sizeBytes ?? null,
-          }
-        : null,
+      attachments: attachments.map((attachment) => ({
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes ?? null,
+        role: getAttachmentRole(attachment),
+      })),
     },
   })
 
@@ -1202,15 +1256,15 @@ export async function processWebConversationMessage(input: {
     }
   }
 
-  const refreshedState = await getConversationState(conversacion.id) ?? ensuredState
-  if (input.attachment) {
+  for (const attachment of attachments) {
+    const refreshedState = await getConversationState(conversacion.id) ?? ensuredState
     await processAttachmentForCurrentState({
       conversationId: conversacion.id,
       telefono: usuario.telefono,
       channel: 'web',
       state: refreshedState,
       user: usuario,
-      attachment: input.attachment,
+      attachment,
       declaredPrestacionCodigo: selectedPrestacion || null,
     })
   }

@@ -109,7 +109,8 @@ export function DashboardPage() {
   const [form, setForm] = useState<DemoBanmedicaPayload>(defaultDemoPayload)
   const [messageText, setMessageText] = useState('')
   const [selectedPrestacionCodigo, setSelectedPrestacionCodigo] = useState('')
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [selectedVoucherFile, setSelectedVoucherFile] = useState<File | null>(null)
+  const [selectedDetailFile, setSelectedDetailFile] = useState<File | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSendingMessage, setIsSendingMessage] = useState(false)
@@ -207,10 +208,10 @@ export function DashboardPage() {
   const handleSendWebMessage = async (override?: Partial<WebConversationMessagePayload>) => {
     const finalText = override?.text ?? messageText
     const finalPrestacionCodigo = override?.prestacionCodigo ?? (selectedPrestacionCodigo || undefined)
-    const finalAttachment = override?.attachment ?? null
+    const finalAttachments = override?.attachments
 
-    if (!finalText.trim() && !finalPrestacionCodigo && !selectedFile && !finalAttachment) {
-      setError('Debes escribir un mensaje, elegir una prestación o adjuntar una boleta.')
+    if (!finalText.trim() && !finalPrestacionCodigo && !selectedVoucherFile && !selectedDetailFile && !finalAttachments?.length) {
+      setError('Debes escribir un mensaje, elegir una prestación o adjuntar al menos un archivo.')
       return
     }
 
@@ -218,19 +219,31 @@ export function DashboardPage() {
     setError(null)
 
     try {
-      const attachmentPayload = finalAttachment ?? (selectedFile
-        ? {
-            fileName: selectedFile.name,
-            mimeType: selectedFile.type || 'application/octet-stream',
-            base64Data: await fileToBase64(selectedFile),
-            sizeBytes: selectedFile.size,
-          }
-        : null)
+      const attachmentsPayload = finalAttachments ?? [
+        selectedVoucherFile
+          ? {
+              fileName: selectedVoucherFile.name,
+              mimeType: selectedVoucherFile.type || 'application/octet-stream',
+              base64Data: await fileToBase64(selectedVoucherFile),
+              sizeBytes: selectedVoucherFile.size,
+              role: 'voucher' as const,
+            }
+          : null,
+        selectedDetailFile
+          ? {
+              fileName: selectedDetailFile.name,
+              mimeType: selectedDetailFile.type || 'application/octet-stream',
+              base64Data: await fileToBase64(selectedDetailFile),
+              sizeBytes: selectedDetailFile.size,
+              role: 'detalle' as const,
+            }
+          : null,
+      ].filter((attachment): attachment is NonNullable<typeof attachment> => Boolean(attachment))
 
       const response = await sendWebConversationMessage({
         text: finalText.trim() || undefined,
         prestacionCodigo: finalPrestacionCodigo ?? null,
-        attachment: attachmentPayload,
+        attachments: attachmentsPayload,
       })
 
       if (!response.success || !response.data) {
@@ -240,7 +253,8 @@ export function DashboardPage() {
       setConversation(response.data)
       setMessageText('')
       setSelectedPrestacionCodigo('')
-      setSelectedFile(null)
+      setSelectedVoucherFile(null)
+      setSelectedDetailFile(null)
       await loadData()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo enviar el mensaje web')
@@ -524,7 +538,7 @@ export function DashboardPage() {
 
             <div className="space-y-4">
               <div className="rounded-xl border p-4">
-                <div className="grid gap-4 md:grid-cols-2">
+                <div className="grid gap-4 md:grid-cols-3">
                   <Select
                     label="Prestación sugerida"
                     value={selectedPrestacionCodigo}
@@ -536,18 +550,33 @@ export function DashboardPage() {
                     placeholder="Elegir prestación"
                   />
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-sm font-medium text-foreground" htmlFor="web-boleta">
-                      Adjuntar boleta o voucher
+                    <label className="text-sm font-medium text-foreground" htmlFor="web-voucher">
+                      Voucher o boleta principal
                     </label>
                     <input
-                      id="web-boleta"
+                      id="web-voucher"
                       type="file"
                       accept="image/png,image/jpeg,image/webp,application/pdf"
                       className="block h-11 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
-                      onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                      onChange={(event) => setSelectedVoucherFile(event.target.files?.[0] ?? null)}
                     />
                     <p className="text-xs text-muted-foreground">
-                      Sube una imagen o PDF. La extracción automática se aplica sobre imágenes.
+                      Sube el documento principal. La extracción automática se aplica sobre imágenes.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium text-foreground" htmlFor="web-detalle">
+                      Detalle u orden médica
+                    </label>
+                    <input
+                      id="web-detalle"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,application/pdf"
+                      className="block h-11 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
+                      onChange={(event) => setSelectedDetailFile(event.target.files?.[0] ?? null)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Opcional para la demo. Si existe, el worker intentará usarlo como respaldo complementario.
                     </p>
                   </div>
                 </div>
@@ -566,10 +595,16 @@ export function DashboardPage() {
                     <SendHorizontal className="h-4 w-4" />
                     Enviar al inbox web
                   </Button>
-                  {selectedFile && (
+                  {selectedVoucherFile && (
                     <div className="inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
                       <Paperclip className="h-3.5 w-3.5" />
-                      {selectedFile.name}
+                      Voucher: {selectedVoucherFile.name}
+                    </div>
+                  )}
+                  {selectedDetailFile && (
+                    <div className="inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs text-secondary-foreground">
+                      <Paperclip className="h-3.5 w-3.5" />
+                      Detalle: {selectedDetailFile.name}
                     </div>
                   )}
                 </div>

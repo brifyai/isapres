@@ -41,15 +41,16 @@ const conversationQuerySchema = z.object({
 const webMessageSchema = z.object({
   text: z.string().max(2000).optional().default(''),
   prestacionCodigo: z.string().max(120).optional().nullable(),
-  attachment: z.object({
+  attachments: z.array(z.object({
     fileName: z.string().min(1).max(255),
     mimeType: z.string().min(3).max(120),
     base64Data: z.string().min(20),
     sizeBytes: z.number().int().nonnegative().optional().nullable(),
-  }).optional().nullable(),
+    role: z.enum(['voucher', 'detalle', 'orden_medica', 'boleta', 'otro']).optional(),
+  })).max(4).optional().default([]),
 }).refine(
-  (value) => Boolean(value.text.trim() || value.prestacionCodigo || value.attachment),
-  { message: 'Debes enviar un mensaje, una prestación o un adjunto.' },
+  (value) => Boolean(value.text.trim() || value.prestacionCodigo || value.attachments.length),
+  { message: 'Debes enviar un mensaje, una prestación o al menos un adjunto.' },
 )
 
 router.get('/overview', asyncHandler(async (req, res) => {
@@ -145,7 +146,7 @@ router.post('/conversacion/web/message', asyncHandler(async (req, res) => {
     userId: userId as number,
     text: body.data.text,
     prestacionCodigo: body.data.prestacionCodigo,
-    attachment: body.data.attachment ?? null,
+    attachments: body.data.attachments,
   })
 
   const snapshot = await getConversationSnapshotByChannel(userId as number, 'web')

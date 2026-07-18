@@ -37,6 +37,7 @@ export interface CreatePrestacionProcessInput {
   requiereFormulario: boolean
   answers: Record<string, string>
   fieldDefinitions: Array<Pick<PrestacionCampoCatalogo, 'campo_key' | 'label' | 'tipo' | 'requerido'>>
+  extraMetadata?: Record<string, unknown>
 }
 
 const DEFAULT_DEMO_BANMEDICA: DemoBanmedicaPayload = {
@@ -317,7 +318,10 @@ export async function createBanmedicaDemoProcess(input: {
         JSON.stringify({
           formulario: mergedPayload,
           prestacion: 'Urgencias Medicas',
+          prestacionCodigo: 'urgencias_medicas',
+          prestacionNombre: 'Urgencias Médicas',
           requiereAdjuntos: true,
+          requiereFormulario: true,
           enviarFormulario: false,
         }),
       ],
@@ -461,6 +465,7 @@ export async function createPrestacionProcess(
           requiereAdjuntos: input.requiereAdjuntos,
           requiereFormulario: input.requiereFormulario,
           enviarFormulario: false,
+          ...(input.extraMetadata ?? {}),
         }),
       ],
     )

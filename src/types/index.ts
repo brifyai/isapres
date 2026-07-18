@@ -324,12 +324,13 @@ export interface WebConversationAttachmentPayload {
   mimeType: string;
   base64Data: string;
   sizeBytes?: number | null;
+  role?: 'voucher' | 'detalle' | 'orden_medica' | 'boleta' | 'otro';
 }
 
 export interface WebConversationMessagePayload {
   text?: string;
   prestacionCodigo?: string | null;
-  attachment?: WebConversationAttachmentPayload | null;
+  attachments?: WebConversationAttachmentPayload[];
 }
 
 export const ESTADO_PROCESO_DEMO_META: Record<
