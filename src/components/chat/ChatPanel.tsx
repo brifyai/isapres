@@ -41,6 +41,24 @@ function getExtractedFields(message: ConversationMessage): string[] {
   return Array.isArray(campos) ? campos.map(String) : []
 }
 
+/** Opciones que el agente ofrece para un campo tipo select. */
+function getFieldOptions(message: ConversationMessage | undefined): Array<{ value: string; label: string }> {
+  const opciones = message?.metadata?.opciones
+  if (!Array.isArray(opciones)) {
+    return []
+  }
+
+  return opciones
+    .map((opcion) => {
+      const raw = opcion as Record<string, unknown>
+      if (raw?.label === undefined) {
+        return null
+      }
+      return { value: String(raw.value ?? raw.label), label: String(raw.label) }
+    })
+    .filter((opcion): opcion is { value: string; label: string } => opcion !== null)
+}
+
 export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
   const [text, setText] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -59,6 +77,16 @@ export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
   const etapa = conversation?.state?.etapa ?? 'idle'
   const esperaDocumento = etapa === 'awaiting_document'
   const ofrecePrestaciones = etapa === 'idle' || etapa === 'awaiting_prestacion'
+
+  // Opciones del último mensaje del agente: sólo valen si sigue siendo la
+  // pregunta vigente y el usuario no respondió después.
+  const opcionesVigentes = useMemo(() => {
+    const ultimo = messages[messages.length - 1]
+    if (etapa !== 'awaiting_field' || ultimo?.direccion !== 'saliente') {
+      return []
+    }
+    return getFieldOptions(ultimo)
+  }, [messages, etapa])
 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -240,6 +268,22 @@ export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
               title={prestacion.disponible ? undefined : 'Aún no habilitada para tramitación automática'}
             >
               {prestacion.nombre}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {opcionesVigentes.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-2">
+          {opcionesVigentes.map((opcion) => (
+            <button
+              key={opcion.value}
+              type="button"
+              disabled={isSending}
+              onClick={() => void send({ text: opcion.label })}
+              className="rounded-full border px-3 py-1.5 text-xs font-medium transition-colors hover:border-primary hover:bg-primary/5 disabled:opacity-50"
+            >
+              {opcion.label}
             </button>
           ))}
         </div>

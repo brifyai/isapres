@@ -572,7 +572,7 @@ cross join (
       'Elige entre boleta de honorarios electrónica, otras boletas/facturas o voucher con tarjeta.',
       true,
       1,
-      '{"opciones":[{"value":"boleta_honorarios_electronica","label":"Boleta de honorarios electrónica"},{"value":"otras_boletas_facturas","label":"Otras boletas o facturas"},{"value":"voucher_tarjeta","label":"Voucher o comprobante de pago con tarjeta"}]}'::jsonb
+      '{"previo_documento":true,"opciones":[{"value":"boleta_honorarios_electronica","label":"Boleta de honorarios electrónica"},{"value":"otras_boletas_facturas","label":"Otras boletas o facturas"},{"value":"voucher_tarjeta","label":"Voucher o comprobante de pago con tarjeta"}]}'::jsonb
     ),
     (
       'rut_profesional',

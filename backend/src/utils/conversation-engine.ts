@@ -7,6 +7,7 @@ import type {
   IsapreId,
   KapsoWebhookPayload,
   MensajeWhatsapp,
+  OpcionCampo,
   OrigenCampo,
   PrestacionCampoCatalogo,
   PrestacionCatalogo,
@@ -356,13 +357,26 @@ function getSlotsAdjuntos(prestacion: PrestacionCatalogo): SlotAdjuntoPrestacion
   })
 }
 
-/** Texto con el que el agente pide el comprobante al entrar en awaiting_document. */
-function buildDocumentRequest(prestacion: PrestacionCatalogo): string {
+const ETIQUETA_TIPO_DOCUMENTO: Record<string, string> = {
+  boleta_honorarios_electronica: 'boleta de honorarios electrónica',
+  otras_boletas_facturas: 'boleta o factura',
+  voucher_tarjeta: 'voucher o comprobante de pago con tarjeta',
+}
+
+/**
+ * Texto con el que el agente pide el comprobante al entrar en awaiting_document.
+ * Si ya se eligio el tipo de documento, lo nombra explicitamente en vez de
+ * usar la etiqueta generica del slot.
+ */
+function buildDocumentRequest(prestacion: PrestacionCatalogo, tipoDocumento?: string): string {
   const slots = getSlotsAdjuntos(prestacion)
   const principal = slots.find((slot) => slot.requerido) ?? slots[0]
   const opcionales = slots.filter((slot) => slot !== principal)
 
-  const base = `Perfecto, vamos con "${prestacion.nombre}". Envíame una foto o PDF de tu ${principal.label.toLowerCase()} y la analizo para completar el formulario por ti.`
+  const documento = (tipoDocumento && ETIQUETA_TIPO_DOCUMENTO[tipoDocumento])
+    ?? principal.label.toLowerCase()
+
+  const base = `Ahora envíame una foto o PDF de tu ${documento} y la analizo para completar el formulario por ti.`
   if (opcionales.length === 0) {
     return base
   }
@@ -410,12 +424,28 @@ function buildExtractionSummary(
   return partes.join(' ')
 }
 
-function getNextPendingField(
+/**
+ * Un campo "previo al documento" no es un dato de la boleta sino una decision
+ * de navegacion: define que sub-formulario abre el portal. Por eso se pregunta
+ * antes de pedir el archivo, no despues.
+ *
+ * El fallback por campo_key mantiene el comportamiento en catalogos anteriores
+ * a la migracion que introdujo el flag.
+ */
+export function isPreDocumentField(field: PrestacionCampoCatalogo): boolean {
+  return field.metadata?.previo_documento === true || field.campo_key === 'tipo_documento_pago'
+}
+
+export function getNextPendingField(
   fields: PrestacionCampoCatalogo[],
   answers: Record<string, unknown>,
+  filtro?: (field: PrestacionCampoCatalogo) => boolean,
 ): PrestacionCampoCatalogo | null {
   return fields.find((field) => {
     if (!field.requerido) {
+      return false
+    }
+    if (filtro && !filtro(field)) {
       return false
     }
     const current = answers[field.campo_key]
@@ -435,12 +465,59 @@ async function continueConversationWithAnswers(input: {
   metadata?: Record<string, unknown>
 }): Promise<void> {
   const fields = await getFieldsByPrestacion(input.prestacion.id)
-  const nextField = getNextPendingField(fields, input.answers)
   const conversationAttachments = await listConversationAttachments(input.conversationId, 20)
   const currentPayload = (input.state.payload ?? {}) as Record<string, unknown>
   const answerOrigins = {
     ...((currentPayload.answerOrigins as Record<string, OrigenCampo> | undefined) ?? {}),
     ...(input.answerOrigins ?? {}),
+  }
+
+  // Tres fases, en este orden:
+  //   1. Campos previos al documento (que sub-formulario abrir en el portal).
+  //   2. El comprobante, del que el OCR saca la mayoria de los datos.
+  //   3. Solo lo que el OCR no logro resolver.
+  const campoPrevio = getNextPendingField(fields, input.answers, isPreDocumentField)
+  const campoPosterior = getNextPendingField(
+    fields,
+    input.answers,
+    (field) => !isPreDocumentField(field),
+  )
+  const nextField = campoPrevio ?? (conversationAttachments.length > 0 ? campoPosterior : null)
+
+  // Si ya subio el documento antes de que le preguntaramos el tipo, el OCR pudo
+  // haberlo deducido; solo se pregunta cuando sigue sin resolverse.
+  if (!campoPrevio && conversationAttachments.length === 0) {
+    await upsertConversationState({
+      conversacionId: input.conversationId,
+      userId: input.user.id,
+      isapreId: input.state.isapre_id,
+      stage: 'awaiting_document',
+      prestacionId: input.prestacion.id,
+      campoActualId: null,
+      procesoDemoId: input.state.proceso_demo_id,
+      payload: {
+        ...currentPayload,
+        selectedPrestacion: input.prestacion.codigo,
+        answers: input.answers,
+        answerOrigins,
+      },
+      metadata: {
+        ...((input.state.metadata ?? {}) as Record<string, unknown>),
+        ...(input.metadata ?? {}),
+      },
+      lastMessageId: input.state.last_message_id,
+    })
+    await sendReply({
+      conversationId: input.conversationId,
+      to: input.telefono,
+      channel: input.channel,
+      body: buildDocumentRequest(input.prestacion, input.answers.tipo_documento_pago),
+      metadata: {
+        stage: 'awaiting_document',
+        prestacionCodigo: input.prestacion.codigo,
+      },
+    })
+    return
   }
 
   if (nextField) {
@@ -574,14 +651,32 @@ async function processAttachmentForCurrentState(input: {
       to: input.telefono,
       channel: input.channel,
       body: isImageMimeType(input.attachment.mimeType)
-        ? `Adjunto "${attachmentRole}" recibido. No pude extraer datos útiles automáticamente desde la imagen.`
-        : `Adjunto "${attachmentRole}" recibido. En esta fase demo la extracción automática está habilitada para imágenes PNG, JPG y WEBP.`,
+        ? `Recibí tu ${attachmentRole}, pero no pude extraer datos automáticamente desde la imagen. Te pediré los datos que falten.`
+        : `Recibí tu ${attachmentRole}. La extracción automática solo funciona con imágenes (PNG, JPG o WEBP), así que te pediré los datos uno por uno.`,
       metadata: {
         attachmentId: attachmentRecord.id,
         attachmentName: attachmentRecord.nombre_archivo,
         attachmentRole,
       },
     })
+
+    // El archivo ya quedó guardado: sin esto la conversación se quedaría
+    // esperando un documento que el usuario ya envió.
+    if (prestacion && isPrestacionDisponible(prestacion)) {
+      await continueConversationWithAnswers({
+        conversationId: input.conversationId,
+        telefono: input.telefono,
+        channel: input.channel,
+        state: input.state,
+        user: input.user,
+        prestacion,
+        answers: ((input.state.payload ?? {}) as Record<string, unknown>).answers as Record<string, string> ?? {},
+        metadata: {
+          attachmentId: attachmentRecord.id,
+          attachmentRole,
+        },
+      })
+    }
     return
   }
 
@@ -782,6 +877,91 @@ async function sendPrestacionesMenu(input: {
   })
 }
 
+/**
+ * El catalogo guarda las opciones en dos formatos historicos: lista de strings
+ * o lista de {value,label}. Normalizamos ambos a {value,label}.
+ */
+function getFieldOptions(field: PrestacionCampoCatalogo): OpcionCampo[] {
+  const opciones = field.metadata?.opciones
+  if (!Array.isArray(opciones)) {
+    return []
+  }
+
+  return opciones
+    .map((opcion) => {
+      if (typeof opcion === 'string') {
+        return { value: opcion, label: opcion }
+      }
+      const raw = opcion as Record<string, unknown>
+      const value = raw.value ?? raw.label
+      if (value === undefined || value === null) {
+        return null
+      }
+      return { value: String(value), label: String(raw.label ?? value) }
+    })
+    .filter((opcion): opcion is OpcionCampo => opcion !== null)
+}
+
+/**
+ * Como normalizeText, pero ademas convierte la puntuacion en espacios: sin
+ * esto "otras boletas/facturas" queda como un unico token y no empareja.
+ */
+function normalizeForMatch(value: string): string {
+  return normalizeText(value)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+
+/**
+ * Empareja lo que escribio el usuario con una opcion del catalogo antes de
+ * gastar una llamada al LLM. Devuelve null cuando la respuesta es
+ * genuinamente ambigua (p. ej. "tengo una boleta", que calza con dos
+ * opciones) para que el agente vuelva a preguntar mostrando los botones.
+ */
+export function matchFieldOption(input: string, opciones: OpcionCampo[]): OpcionCampo | null {
+  const normalized = normalizeForMatch(input)
+  if (!normalized || opciones.length === 0) {
+    return null
+  }
+
+  const exacta = opciones.find(
+    (opcion) => normalizeForMatch(opcion.value) === normalized
+      || normalizeForMatch(opcion.label) === normalized,
+  )
+  if (exacta) {
+    return exacta
+  }
+
+  // Contencion en cualquier direccion, siempre que sea inequivoca.
+  const contenidas = opciones.filter((opcion) => {
+    const label = normalizeForMatch(opcion.label)
+    const value = normalizeForMatch(opcion.value)
+    return normalized.includes(label) || label.includes(normalized) || normalized.includes(value)
+  })
+  if (contenidas.length === 1) {
+    return contenidas[0]
+  }
+
+  // Como ultimo recurso, la opcion que comparta mas palabras significativas,
+  // siempre que gane sin empate.
+  const palabras = normalized.split(' ').filter((palabra) => palabra.length > 3)
+  if (palabras.length === 0) {
+    return null
+  }
+
+  const puntajes = opciones.map((opcion) => {
+    const label = normalizeForMatch(opcion.label)
+    return {
+      opcion,
+      puntaje: palabras.filter((palabra) => label.includes(palabra)).length,
+    }
+  })
+  const mejor = puntajes.reduce((a, b) => (b.puntaje > a.puntaje ? b : a))
+  const empatados = puntajes.filter((item) => item.puntaje === mejor.puntaje).length
+
+  return mejor.puntaje > 0 && empatados === 1 ? mejor.opcion : null
+}
+
 function getHelpTextForField(field: PrestacionCampoCatalogo): string {
   const hint = field.ayuda ?? field.placeholder ?? 'Ingresa el dato solicitado.'
   return `${field.label}: ${hint}`
@@ -793,14 +973,21 @@ async function askField(
   field: PrestacionCampoCatalogo,
   channel?: CanalConversacion,
 ): Promise<void> {
+  const opciones = getFieldOptions(field)
+
   await sendReply({
     conversationId,
     to: telefono,
     channel,
-    body: getHelpTextForField(field),
+    body: opciones.length > 0
+      ? `${field.label}: elige una opción.`
+      : getHelpTextForField(field),
     metadata: {
       stage: 'awaiting_field',
       campoKey: field.campo_key,
+      // El chat las pinta como botones para no depender de que el usuario
+      // escriba la etiqueta exacta.
+      opciones,
     },
   })
 }
@@ -895,6 +1082,21 @@ async function parseFieldValue(
   const trimmed = text.trim()
   if (!trimmed) {
     return { valid: false, normalized: null, error: 'Necesito una respuesta para continuar.' }
+  }
+
+  // Los campos con opciones se resuelven contra el catalogo: es mas fiable y
+  // mas barato que preguntarle al LLM si "tengo una boleta" es una opcion.
+  const opciones = getFieldOptions(field)
+  if (opciones.length > 0) {
+    const match = matchFieldOption(trimmed, opciones)
+    if (match) {
+      return { valid: true, normalized: match.value }
+    }
+    return {
+      valid: false,
+      normalized: null,
+      error: `No logré identificar la opción. Elige una de estas: ${opciones.map((opcion) => opcion.label).join(', ')}.`,
+    }
   }
 
   switch (field.tipo) {
@@ -1030,6 +1232,7 @@ async function handleFieldFlow(input: {
       metadata: {
         campoKey: field.campo_key,
         validationFailed: true,
+        opciones: getFieldOptions(field),
       },
     })
     return
@@ -1155,31 +1358,26 @@ async function handlePrestacionSelection(input: {
     return
   }
 
-  // El comprobante va primero: de ahi sale la mayoria de los datos del formulario
-  // y solo preguntamos lo que el OCR no logre resolver.
-  await upsertConversationState({
-    conversacionId: input.conversationId,
-    userId: input.user.id,
-    isapreId: input.state.isapre_id,
-    stage: 'awaiting_document',
-    prestacionId: prestacion.id,
-    campoActualId: null,
-    payload: {
-      selectedPrestacion: prestacion.codigo,
-      answers: {},
-    },
-    metadata: {},
-  })
-
   await sendReply({
     conversationId: input.conversationId,
     to: input.telefono,
     channel: input.channel,
-    body: buildDocumentRequest(prestacion),
+    body: `Perfecto, vamos con "${prestacion.nombre}".`,
     metadata: {
-      stage: 'awaiting_document',
       prestacionCodigo: prestacion.codigo,
     },
+  })
+
+  // El router decide si toca preguntar el tipo de comprobante, pedir el
+  // documento o seguir con los campos: toda la secuencia vive en un solo lugar.
+  await continueConversationWithAnswers({
+    conversationId: input.conversationId,
+    telefono: input.telefono,
+    channel: input.channel,
+    state: input.state,
+    user: input.user,
+    prestacion,
+    answers: {},
   })
 }
 

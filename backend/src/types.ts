@@ -133,6 +133,12 @@ export type RolAdjuntoConversacion = 'voucher' | 'detalle' | 'orden_medica' | 'b
 /** Origen del valor de un campo, para trazabilidad en el historial. */
 export type OrigenCampo = 'ocr' | 'usuario' | 'default'
 
+/** Opción de un campo tipo select, normalizada desde el catálogo. */
+export interface OpcionCampo {
+  value: string
+  label: string
+}
+
 /** Slot de adjunto declarado en catalogo_prestaciones.metadata.adjuntos */
 export interface SlotAdjuntoPrestacion {
   role: RolAdjuntoConversacion
