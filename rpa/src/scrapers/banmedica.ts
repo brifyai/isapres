@@ -445,22 +445,107 @@ export class BanmedicaScraper extends BaseScraper {
     await this.page.waitForURL(/\/view\/reembolso/, { timeout: 15000 })
     await this.page.waitForTimeout(2000)
 
-    await this.safeClick([
+    await this.selectBeneficiario(ctx)
+    await this.selectPrestacionCard([prestacionLabel, prestacionLabel.replace('é', 'e').replace('á', 'a')], ctx)
+  }
+
+  /**
+   * El carrusel de beneficiarios es un <swiper-container init="false">: hasta
+   * que Swiper arranca por JS los slides no tienen dimensiones y Playwright los
+   * considera invisibles. Por eso esperamos a que esten *adjuntos* (no
+   * visibles) y clickeamos con force, verificando el avance por el resultado
+   * (que aparezcan las tarjetas de prestacion) y no por la actionability.
+   */
+  private async selectBeneficiario(ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      throw new Error('Pagina no inicializada')
+    }
+
+    const candidatos = [
       '.id-carrusel .card.shadow-sm',
       '.id-carrusel .card',
+      '.id-carrusel swiper-slide .col',
       '.id-carrusel swiper-slide',
+      'swiper-slide .card',
       '.id-carrusel [role="group"]',
-    ], 'Seleccionar primer beneficiario disponible', ctx, true)
+    ]
 
-    await this.page.waitForTimeout(2000)
-    await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => undefined)
-    await this.selectPrestacionCard([prestacionLabel, prestacionLabel.replace('é', 'e').replace('á', 'a')], ctx)
+    // El listado de beneficiarios llega por API: esperamos a que exista alguno.
+    await this.page
+      .locator(candidatos.join(', '))
+      .first()
+      .waitFor({ state: 'attached', timeout: 25000 })
+      .catch(() => undefined)
+
+    for (const selector of candidatos) {
+      const locator = this.page.locator(selector)
+      const total = await locator.count().catch(() => 0)
+      if (total === 0) {
+        continue
+      }
+
+      const primero = locator.first()
+      await primero.scrollIntoViewIfNeeded().catch(() => undefined)
+      // force evita el chequeo de visibilidad que falla con el swiper dormido.
+      await primero.click({ force: true, timeout: 10000 }).catch(() => undefined)
+      await this.page.waitForTimeout(1500)
+
+      const avanzo = await this.page
+        .locator('.option-box')
+        .first()
+        .waitFor({ state: 'attached', timeout: 8000 })
+        .then(() => true)
+        .catch(() => false)
+
+      if (avanzo) {
+        await ctx.recordStep({
+          etapa: 'navegacion',
+          accion: 'click',
+          detalle: 'Seleccionar primer beneficiario disponible',
+          selector,
+          url: this.page.url(),
+          status: 'success',
+          payload: { candidatosEncontrados: total },
+        })
+        return
+      }
+    }
+
+    // Si el portal ya mostraba las prestaciones, no habia beneficiario que elegir.
+    const yaEnPrestaciones = await this.page.locator('.option-box').count().catch(() => 0)
+    if (yaEnPrestaciones > 0) {
+      await ctx.recordStep({
+        etapa: 'navegacion',
+        accion: 'beneficiario_no_requerido',
+        detalle: 'El portal mostró las prestaciones sin pedir beneficiario',
+        url: this.page.url(),
+        status: 'info',
+      })
+      return
+    }
+
+    await ctx.recordStep({
+      etapa: 'navegacion',
+      accion: 'beneficiario_no_encontrado',
+      detalle: 'No se pudo seleccionar un beneficiario en el carrusel',
+      url: this.page.url(),
+      status: 'error',
+      payload: await this.buildSelectorFailureEvidence(candidatos),
+    })
+
+    throw new Error('No se pudo seleccionar el beneficiario en Banmedica')
   }
 
   private async selectPrestacionCard(labels: string[], ctx: DemoExecutionContext): Promise<void> {
     if (!this.page) {
       throw new Error('Pagina no inicializada')
     }
+
+    await this.page
+      .locator('.option-box')
+      .first()
+      .waitFor({ state: 'attached', timeout: 15000 })
+      .catch(() => undefined)
 
     const cards = this.page.locator('.option-box')
     const totalCards = await cards.count()
@@ -706,6 +791,23 @@ export class BanmedicaScraper extends BaseScraper {
     }).catch(() => [])
   }
 
+  /**
+   * Captura JPEG comprimida del viewport. Se guarda en el paso para poder ver
+   * que mostraba el portal sin reproducir el fallo.
+   */
+  private async captureScreenshot(): Promise<string | null> {
+    if (!this.page || process.env.RPA_CAPTURAS === 'off') {
+      return null
+    }
+
+    try {
+      const buffer = await this.page.screenshot({ type: 'jpeg', quality: 45, timeout: 8000 })
+      return buffer.toString('base64')
+    } catch {
+      return null
+    }
+  }
+
   /** Evidencia compacta para depurar un selector que no encontro su elemento. */
   private async buildSelectorFailureEvidence(
     selectoresIntentados: string[],
@@ -722,6 +824,7 @@ export class BanmedicaScraper extends BaseScraper {
         }))
         .slice(0, 25),
       textosClickeables: await this.captureClickableTexts(),
+      capturaBase64: await this.captureScreenshot(),
     }
   }
 

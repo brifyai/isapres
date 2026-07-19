@@ -16,6 +16,7 @@ import { Banner } from '@/components/ui/Banner'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { ChatPanel } from '@/components/chat/ChatPanel'
+import { StepEvidence } from '@/components/demo/StepEvidence'
 import {
   createBanmedicaDemo,
   getConversationSnapshot,
@@ -174,6 +175,32 @@ export function DashboardPage() {
   useEffect(() => {
     void loadData()
   }, [loadData])
+
+  // Mientras el worker esté trabajando, refrescamos solo lo que cambia
+  // (lista + detalle) para ver la bitácora avanzar sin recargar la página.
+  const hayProcesoActivo = useMemo(
+    () => procesos.some((process) => process.estado === 'pendiente' || process.estado === 'en_progreso'),
+    [procesos],
+  )
+
+  useEffect(() => {
+    if (!hayProcesoActivo) {
+      return
+    }
+
+    const intervalo = window.setInterval(async () => {
+      const response = await getDemoProcesos()
+      if (response.success && response.data) {
+        setProcesos(response.data)
+      }
+      const enCurso = selectedProcessIdRef.current
+      if (enCurso) {
+        await loadProcessDetail(enCurso)
+      }
+    }, 3000)
+
+    return () => window.clearInterval(intervalo)
+  }, [hayProcesoActivo, loadProcessDetail])
 
   const handleChange = <K extends keyof DemoBanmedicaPayload>(key: K, value: DemoBanmedicaPayload[K]) => {
     setForm((current) => ({
@@ -516,6 +543,15 @@ export function DashboardPage() {
                 <p className="text-sm text-muted-foreground">
                   Cola, ejecuciones y resultados de navegación.
                 </p>
+                {hayProcesoActivo && (
+                  <span className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+                    <span className="relative flex h-2 w-2">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
+                    </span>
+                    Siguiendo el proceso en vivo
+                  </span>
+                )}
               </div>
               <CalendarClock className="h-5 w-5 text-primary" />
             </div>
@@ -614,6 +650,7 @@ export function DashboardPage() {
                         {step.selector && (
                           <p className="mt-1 break-all text-xs text-muted-foreground">Selector: {step.selector}</p>
                         )}
+                        <StepEvidence payload={step.payload} />
                       </div>
                     ))}
                   </div>
