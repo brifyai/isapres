@@ -68,11 +68,101 @@ export class BanmedicaScraper extends BaseScraper {
   ): Promise<ResultadoReembolso> {
     const prestacionCodigo = String(task.metadata?.prestacionCodigo ?? '')
 
-    if (prestacionCodigo === 'consultas_psicologia') {
-      return this.procesarDemoConsultas(task, credenciales, ctx)
+    // Despacho explicito: una prestacion sin flujo propio debe fallar de forma
+    // visible, no caer silenciosamente en el formulario de otra.
+    switch (prestacionCodigo) {
+      case 'consultas_psicologia':
+        return this.procesarDemoConsultas(task, credenciales, ctx)
+      case 'urgencias_medicas':
+        return this.procesarDemoUrgencia(task, credenciales, ctx)
+      default:
+        await ctx.recordStep({
+          etapa: 'error',
+          accion: 'prestacion_no_implementada',
+          detalle: `La prestación "${prestacionCodigo || '(sin código)'}" no tiene un flujo RPA implementado en Banmédica.`,
+          status: 'error',
+          payload: { prestacionCodigo },
+        }).catch(() => undefined)
+
+        return {
+          success: false,
+          error: `Prestación no implementada en el scraper de Banmédica: ${prestacionCodigo || '(sin código)'}`,
+        }
+    }
+  }
+
+  /**
+   * Banmedica muestra anuncios y modales promocionales tras el login que
+   * bloquean los clicks posteriores. Los cerramos antes de navegar.
+   */
+  private async dismissAnnouncements(ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      return
     }
 
-    return this.procesarDemoUrgencia(task, credenciales, ctx)
+    const closeSelectors = [
+      '.modal.show button.close',
+      '.modal.show .close',
+      '.modal.show button[aria-label="Close"]',
+      '.modal.show button:has-text("Cerrar")',
+      '.modal.show button:has-text("Entendido")',
+      '.modal.show button:has-text("Acepto")',
+      'button[aria-label="Close"]',
+    ]
+
+    let cerrados = 0
+    // Puede haber mas de un anuncio encadenado.
+    for (let intento = 0; intento < 3; intento += 1) {
+      const modalVisible = await this.page.locator('.modal.show').first().isVisible().catch(() => false)
+      if (!modalVisible) {
+        break
+      }
+
+      let cerroEnEstaVuelta = false
+      for (const selector of closeSelectors) {
+        const locator = this.page.locator(selector).first()
+        const visible = await locator.isVisible().catch(() => false)
+        if (!visible) {
+          continue
+        }
+
+        await locator.click({ timeout: 5000 }).catch(async () => {
+          await locator.click({ force: true, timeout: 5000 }).catch(() => undefined)
+        })
+        await this.page.waitForTimeout(800)
+        cerrados += 1
+        cerroEnEstaVuelta = true
+        break
+      }
+
+      if (!cerroEnEstaVuelta) {
+        await this.page.keyboard.press('Escape').catch(() => undefined)
+        await this.page.waitForTimeout(600)
+      }
+    }
+
+    // Un backdrop huerfano intercepta los clicks aunque el modal ya no se vea.
+    await this.page.evaluate(() => {
+      const doc = ((globalThis as unknown) as {
+        document: {
+          querySelectorAll: (selector: string) => ArrayLike<{ remove: () => void }>
+          body: { classList: { remove: (token: string) => void } }
+        }
+      }).document
+      Array.from(doc.querySelectorAll('.modal-backdrop')).forEach((element) => element.remove())
+      doc.body.classList.remove('modal-open')
+    }).catch(() => undefined)
+
+    await ctx.recordStep({
+      etapa: 'navegacion',
+      accion: 'cerrar_anuncios',
+      detalle: cerrados > 0
+        ? `Se cerraron ${cerrados} anuncio(s) o modal(es) post-login`
+        : 'No se detectaron anuncios que cerrar',
+      url: this.page.url(),
+      status: 'info',
+      payload: { cerrados },
+    })
   }
 
   override async login(credenciales: CredencialesDescifradas): Promise<boolean> {
@@ -137,9 +227,18 @@ export class BanmedicaScraper extends BaseScraper {
         }
       }
 
+      await this.dismissAnnouncements(ctx)
       await this.navigateToUrgencias(ctx)
       await this.discoverVisibleFields(ctx)
       await this.fillUrgenciaForm(form, ctx)
+      await this.uploadAttachments(
+        this.normalizeAttachments(task),
+        [
+          { role: 'boleta', detalle: 'Adjuntar boleta o voucher de la urgencia', requerido: true },
+          { role: 'detalle', detalle: 'Adjuntar detalle de prestación', requerido: false },
+        ],
+        ctx,
+      )
 
       await ctx.recordStep({
         etapa: 'finalizacion',
@@ -206,11 +305,19 @@ export class BanmedicaScraper extends BaseScraper {
         }
       }
 
+      await this.dismissAnnouncements(ctx)
       await this.navigateToPrestacion('Consultas Médicas y Atenciones Psicológicas', ctx)
       await this.selectDocumentTypeAndStartNewClaim(form, ctx)
       await this.discoverVisibleFields(ctx)
       await this.fillConsultasForm(form, ctx)
-      await this.uploadConsultasAttachments(form, ctx)
+      await this.uploadAttachments(
+        form.attachments,
+        [
+          { role: 'voucher', detalle: 'Adjuntar voucher/boleta principal', requerido: true },
+          { role: 'detalle', detalle: 'Adjuntar detalle u orden médica', requerido: false },
+        ],
+        ctx,
+      )
 
       await ctx.recordStep({
         etapa: 'finalizacion',
@@ -258,11 +365,24 @@ export class BanmedicaScraper extends BaseScraper {
     }
   }
 
-  private normalizeConsultasForm(task: ProcesoDemoTask): BanmedicaConsultasForm {
-    const formulario = task.metadata?.formulario ?? {}
+  /** Los adjuntos llegan igual para toda prestacion; el formato no depende del flujo. */
+  private normalizeAttachments(task: ProcesoDemoTask): BanmedicaConsultasAttachment[] {
     const attachments = Array.isArray(task.metadata?.attachments)
       ? task.metadata.attachments as Array<Record<string, unknown>>
       : []
+
+    return attachments
+      .map((attachment) => ({
+        role: this.normalizeAttachmentRole(String(attachment.role ?? 'voucher')),
+        fileName: String(attachment.fileName ?? `archivo-${attachment.id ?? 'demo'}`),
+        mimeType: String(attachment.mimeType ?? 'application/octet-stream'),
+        base64Data: String(attachment.base64Data ?? ''),
+      }))
+      .filter((attachment) => attachment.base64Data.length > 0)
+  }
+
+  private normalizeConsultasForm(task: ProcesoDemoTask): BanmedicaConsultasForm {
+    const formulario = task.metadata?.formulario ?? {}
 
     return {
       tipoDocumentoPago: this.normalizeDocumentType(String(formulario.tipo_documento_pago ?? 'otras_boletas_facturas')),
@@ -275,14 +395,7 @@ export class BanmedicaScraper extends BaseScraper {
       fechaAtencion: String(formulario.fecha_atencion ?? ''),
       tipoPago: String(formulario.tipo_pago ?? 'tarjeta'),
       observaciones: String(formulario.observaciones ?? ''),
-      attachments: attachments
-        .map((attachment) => ({
-          role: this.normalizeAttachmentRole(String(attachment.role ?? 'voucher')),
-          fileName: String(attachment.fileName ?? `archivo-${attachment.id ?? 'demo'}`),
-          mimeType: String(attachment.mimeType ?? 'application/octet-stream'),
-          base64Data: String(attachment.base64Data ?? ''),
-        }))
-        .filter((attachment) => attachment.base64Data.length > 0),
+      attachments: this.normalizeAttachments(task),
     }
   }
 
@@ -380,6 +493,16 @@ export class BanmedicaScraper extends BaseScraper {
       return
     }
 
+    await ctx.recordStep({
+      etapa: 'navegacion',
+      accion: 'prestacion_no_encontrada',
+      detalle: `No se encontró la tarjeta de prestación "${labels[0]}"`,
+      selector: '.option-box',
+      url: this.page.url(),
+      status: 'error',
+      payload: await this.buildSelectorFailureEvidence(['.option-box']),
+    })
+
     throw new Error(`No se encontro el elemento requerido: Elegir prestación ${labels[0]}`)
   }
 
@@ -469,6 +592,8 @@ export class BanmedicaScraper extends BaseScraper {
       return true
     }
 
+    const evidencia = await this.buildSelectorFailureEvidence(selectors)
+
     if (optional) {
       await ctx.recordStep({
         etapa: 'navegacion',
@@ -476,19 +601,34 @@ export class BanmedicaScraper extends BaseScraper {
         detalle: detail,
         url: this.page.url(),
         status: 'warning',
+        payload: evidencia,
       })
       return false
     }
 
+    await ctx.recordStep({
+      etapa: 'navegacion',
+      accion: 'click_fallido',
+      detalle: `No se encontró el elemento requerido: ${detail}`,
+      url: this.page.url(),
+      status: 'error',
+      payload: evidencia,
+    })
+
     throw new Error(`No se encontro el elemento requerido: ${detail}`)
   }
 
-  private async discoverVisibleFields(ctx: DemoExecutionContext): Promise<void> {
+  /**
+   * Inventario de los inputs visibles en la pantalla actual. Se usa tanto para
+   * registrar los campos detectados como para dejar evidencia cuando un
+   * selector falla y hay que corregirlo desde el historial.
+   */
+  private async captureVisibleFields(): Promise<Array<Record<string, unknown> | null>> {
     if (!this.page) {
-      return
+      return []
     }
 
-    const fields = await this.page.evaluate(() => {
+    return this.page.evaluate(() => {
       const doc = ((globalThis as unknown) as {
         document: { querySelectorAll: (selector: string) => ArrayLike<unknown> }
       }).document
@@ -536,6 +676,61 @@ export class BanmedicaScraper extends BaseScraper {
         })
         .filter(Boolean)
     })
+  }
+
+  /** Textos de botones y enlaces visibles, para depurar un click fallido. */
+  private async captureClickableTexts(): Promise<string[]> {
+    if (!this.page) {
+      return []
+    }
+
+    return this.page.evaluate(() => {
+      const doc = ((globalThis as unknown) as {
+        document: { querySelectorAll: (selector: string) => ArrayLike<unknown> }
+      }).document
+      const elements = Array.from(
+        doc.querySelectorAll('button, a, .option, .option-box, [role="button"]'),
+      ) as Array<{
+        getBoundingClientRect: () => { width: number; height: number }
+        textContent?: string | null
+      }>
+
+      return elements
+        .filter((element) => {
+          const rect = element.getBoundingClientRect()
+          return rect.width > 0 && rect.height > 0
+        })
+        .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+        .filter((text) => text.length > 0 && text.length < 120)
+        .slice(0, 40)
+    }).catch(() => [])
+  }
+
+  /** Evidencia compacta para depurar un selector que no encontro su elemento. */
+  private async buildSelectorFailureEvidence(
+    selectoresIntentados: string[],
+  ): Promise<Record<string, unknown>> {
+    const campos = await this.captureVisibleFields().catch(() => [])
+    return {
+      selectoresIntentados,
+      camposVisibles: campos
+        .filter(Boolean)
+        .map((campo) => ({
+          label: campo?.label,
+          selector: campo?.selector,
+          tipo: campo?.tipo,
+        }))
+        .slice(0, 25),
+      textosClickeables: await this.captureClickableTexts(),
+    }
+  }
+
+  private async discoverVisibleFields(ctx: DemoExecutionContext): Promise<void> {
+    if (!this.page) {
+      return
+    }
+
+    const fields = await this.captureVisibleFields()
 
     for (const field of fields) {
       await ctx.upsertField({
@@ -848,40 +1043,49 @@ export class BanmedicaScraper extends BaseScraper {
     )
   }
 
-  private async uploadConsultasAttachments(form: BanmedicaConsultasForm, ctx: DemoExecutionContext): Promise<void> {
+  /** Roles intercambiables: un voucher sirve donde se pide boleta, y viceversa. */
+  private static readonly ROLES_EQUIVALENTES: Record<string, BanmedicaConsultasAttachment['role'][]> = {
+    voucher: ['voucher', 'boleta'],
+    boleta: ['boleta', 'voucher'],
+    detalle: ['detalle', 'orden_medica'],
+    orden_medica: ['orden_medica', 'detalle'],
+    otro: ['otro'],
+  }
+
+  /**
+   * Sube los adjuntos disponibles a las zonas de carga de la pantalla actual.
+   * Los slots van en el mismo orden en que Banmedica los renderiza.
+   */
+  private async uploadAttachments(
+    attachments: BanmedicaConsultasAttachment[],
+    slots: Array<{ role: BanmedicaConsultasAttachment['role']; detalle: string; requerido: boolean }>,
+    ctx: DemoExecutionContext,
+  ): Promise<void> {
     if (!this.page) {
       throw new Error('Pagina no inicializada')
     }
 
-    const voucher = form.attachments.find((attachment) => attachment.role === 'voucher' || attachment.role === 'boleta')
-    const detail = form.attachments.find((attachment) => attachment.role === 'detalle' || attachment.role === 'orden_medica')
+    const disponibles = [...attachments]
 
-    if (voucher) {
-      await this.uploadAttachmentToInput(
-        'input[type="file"]',
-        0,
-        voucher,
-        'Adjuntar voucher/boleta principal',
-        ctx,
-      )
-    }
+    for (const [index, slot] of slots.entries()) {
+      const preferencias = BanmedicaScraper.ROLES_EQUIVALENTES[slot.role] ?? [slot.role]
+      const encontradoIndex = disponibles.findIndex((attachment) => preferencias.includes(attachment.role))
 
-    if (detail) {
-      await this.uploadAttachmentToInput(
-        'input[type="file"]',
-        1,
-        detail,
-        'Adjuntar detalle u orden médica',
-        ctx,
-      )
-    } else {
-      await ctx.recordStep({
-        etapa: 'adjuntos',
-        accion: 'adjunto_opcional_omitido',
-        detalle: 'No se recibió archivo de detalle u orden médica para esta ejecución demo',
-        url: this.page.url(),
-        status: 'warning',
-      })
+      if (encontradoIndex === -1) {
+        await ctx.recordStep({
+          etapa: 'adjuntos',
+          accion: slot.requerido ? 'adjunto_requerido_faltante' : 'adjunto_opcional_omitido',
+          detalle: `${slot.detalle}: no se recibió un archivo con rol "${slot.role}"`,
+          url: this.page.url(),
+          status: slot.requerido ? 'error' : 'warning',
+          payload: { slotRole: slot.role, requerido: slot.requerido },
+        })
+        continue
+      }
+
+      // Consumimos el archivo para no subir el mismo en dos slots.
+      const [attachment] = disponibles.splice(encontradoIndex, 1)
+      await this.uploadAttachmentToInput('input[type="file"]', index, attachment, slot.detalle, ctx)
     }
   }
 
@@ -1007,6 +1211,7 @@ export class BanmedicaScraper extends BaseScraper {
       detalle: `Campo no encontrado: ${field.label}`,
       url: this.page?.url(),
       status: 'warning',
+      payload: await this.buildSelectorFailureEvidence(selectors),
     })
     return false
   }
@@ -1081,6 +1286,7 @@ export class BanmedicaScraper extends BaseScraper {
       detalle: `Campo no encontrado: ${field.label}`,
       url: this.page?.url(),
       status: 'warning',
+      payload: await this.buildSelectorFailureEvidence(selectors),
     })
     return false
   }
@@ -1154,6 +1360,7 @@ export class BanmedicaScraper extends BaseScraper {
       detalle: `Campo no encontrado: ${field.label}`,
       url: this.page?.url(),
       status: 'warning',
+      payload: await this.buildSelectorFailureEvidence(selectors),
     })
     return false
   }

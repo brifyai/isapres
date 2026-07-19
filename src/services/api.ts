@@ -182,6 +182,7 @@ interface RawPrestacionDisponible {
   requiere_adjuntos: boolean
   activa: boolean
   orden: number
+  metadata?: Record<string, unknown> | null
 }
 
 function mapUsuario(raw: RawUsuario): Usuario {
@@ -312,6 +313,8 @@ function mapPrestacionDisponible(raw: RawPrestacionDisponible): PrestacionDispon
     requiereAdjuntos: raw.requiere_adjuntos,
     activa: raw.activa,
     orden: raw.orden,
+    // El catálogo sólo marca las bloqueadas; ausencia del flag = disponible.
+    disponible: raw.metadata?.disponible !== false,
   }
 }
 

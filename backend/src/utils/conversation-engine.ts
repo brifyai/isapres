@@ -7,10 +7,12 @@ import type {
   IsapreId,
   KapsoWebhookPayload,
   MensajeWhatsapp,
+  OrigenCampo,
   PrestacionCampoCatalogo,
   PrestacionCatalogo,
   ProcesoDemo,
   RolAdjuntoConversacion,
+  SlotAdjuntoPrestacion,
   Usuario,
   WebhookEventLog,
 } from '../types.js'
@@ -329,6 +331,85 @@ function isConsultasPrestacion(prestacionCodigo: string): boolean {
   return prestacionCodigo === 'consultas_psicologia'
 }
 
+/**
+ * Una prestacion esta disponible salvo que el catalogo la marque explicitamente
+ * como no disponible. Las que aun no tienen flujo RPA implementado se declaran
+ * con metadata.disponible = false.
+ */
+function isPrestacionDisponible(prestacion: PrestacionCatalogo): boolean {
+  return prestacion.metadata?.disponible !== false
+}
+
+function getSlotsAdjuntos(prestacion: PrestacionCatalogo): SlotAdjuntoPrestacion[] {
+  const slots = prestacion.metadata?.adjuntos
+  if (!Array.isArray(slots)) {
+    return [{ role: 'voucher', label: 'Boleta, factura o voucher', requerido: true }]
+  }
+
+  return slots.map((slot) => {
+    const raw = slot as Record<string, unknown>
+    return {
+      role: (raw.role as RolAdjuntoConversacion) ?? 'voucher',
+      label: String(raw.label ?? 'Documento'),
+      requerido: raw.requerido !== false,
+    }
+  })
+}
+
+/** Texto con el que el agente pide el comprobante al entrar en awaiting_document. */
+function buildDocumentRequest(prestacion: PrestacionCatalogo): string {
+  const slots = getSlotsAdjuntos(prestacion)
+  const principal = slots.find((slot) => slot.requerido) ?? slots[0]
+  const opcionales = slots.filter((slot) => slot !== principal)
+
+  const base = `Perfecto, vamos con "${prestacion.nombre}". Envíame una foto o PDF de tu ${principal.label.toLowerCase()} y la analizo para completar el formulario por ti.`
+  if (opcionales.length === 0) {
+    return base
+  }
+
+  return `${base} Si además tienes ${opcionales.map((slot) => slot.label.toLowerCase()).join(' o ')}, puedes adjuntarlo después.`
+}
+
+/**
+ * Resume que se pudo extraer del comprobante y que queda por preguntar, para que
+ * el usuario entienda por que se le pide un dato y no otro.
+ */
+function buildExtractionSummary(
+  fields: PrestacionCampoCatalogo[],
+  answers: Record<string, string>,
+  extractedKeys: string[],
+): string {
+  const labelOf = (key: string): string =>
+    fields.find((field) => field.campo_key === key)?.label ?? key
+
+  const extraidos = extractedKeys
+    .filter((key) => fields.some((field) => field.campo_key === key))
+    .map(labelOf)
+
+  const faltantes = fields
+    .filter((field) => field.requerido)
+    .filter((field) => {
+      const value = answers[field.campo_key]
+      return typeof value !== 'string' || value.trim().length === 0
+    })
+    .map((field) => field.label)
+
+  const partes: string[] = []
+  if (extraidos.length > 0) {
+    partes.push(`Extraje del documento: ${extraidos.join(', ')}.`)
+  } else {
+    partes.push('No pude extraer datos utilizables del documento.')
+  }
+
+  if (faltantes.length > 0) {
+    partes.push(`Me falta ${faltantes.length === 1 ? 'un dato' : `${faltantes.length} datos`}: ${faltantes.join(', ')}.`)
+  } else {
+    partes.push('Tengo todo lo necesario para continuar.')
+  }
+
+  return partes.join(' ')
+}
+
 function getNextPendingField(
   fields: PrestacionCampoCatalogo[],
   answers: Record<string, unknown>,
@@ -350,11 +431,17 @@ async function continueConversationWithAnswers(input: {
   user: Usuario
   prestacion: PrestacionCatalogo
   answers: Record<string, string>
+  answerOrigins?: Record<string, OrigenCampo>
   metadata?: Record<string, unknown>
 }): Promise<void> {
   const fields = await getFieldsByPrestacion(input.prestacion.id)
   const nextField = getNextPendingField(fields, input.answers)
   const conversationAttachments = await listConversationAttachments(input.conversationId, 20)
+  const currentPayload = (input.state.payload ?? {}) as Record<string, unknown>
+  const answerOrigins = {
+    ...((currentPayload.answerOrigins as Record<string, OrigenCampo> | undefined) ?? {}),
+    ...(input.answerOrigins ?? {}),
+  }
 
   if (nextField) {
     await upsertConversationState({
@@ -366,9 +453,10 @@ async function continueConversationWithAnswers(input: {
       campoActualId: nextField.id,
       procesoDemoId: input.state.proceso_demo_id,
       payload: {
-        ...((input.state.payload ?? {}) as Record<string, unknown>),
+        ...currentPayload,
         selectedPrestacion: input.prestacion.codigo,
         answers: input.answers,
+        answerOrigins,
       },
       metadata: {
         ...((input.state.metadata ?? {}) as Record<string, unknown>),
@@ -390,6 +478,7 @@ async function continueConversationWithAnswers(input: {
     requiereAdjuntos: input.prestacion.requiere_adjuntos,
     requiereFormulario: input.prestacion.requiere_formulario,
     answers: input.answers,
+    answerOrigins,
     fieldDefinitions: fields,
     extraMetadata: {
       attachments: buildProcessAttachmentPayload(conversationAttachments),
@@ -405,9 +494,10 @@ async function continueConversationWithAnswers(input: {
     campoActualId: null,
     procesoDemoId: process.id,
     payload: {
-      ...((input.state.payload ?? {}) as Record<string, unknown>),
+      ...currentPayload,
       selectedPrestacion: input.prestacion.codigo,
       answers: input.answers,
+      answerOrigins,
     },
     metadata: {
       ...((input.state.metadata ?? {}) as Record<string, unknown>),
@@ -521,17 +611,18 @@ async function processAttachmentForCurrentState(input: {
     return
   }
 
-  if (!prestacion.requiere_formulario) {
+  if (!isPrestacionDisponible(prestacion)) {
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
       channel: input.channel,
-      body: `Boleta analizada para "${prestacion.nombre}". ${extraction.resumen} Esta prestación queda registrada y preparada para la fase de adjuntos, pero aún no ejecuta un flujo automático completo.`,
+      body: `Analicé el documento para "${prestacion.nombre}", pero esa prestación todavía no está habilitada para tramitación automática. Dejé el archivo y los datos registrados.`,
       metadata: {
         attachmentId: attachmentRecord.id,
         attachmentRole,
         extraction,
         prestacionCodigo: prestacion.codigo,
+        prestacionBloqueada: true,
       },
     })
     return
@@ -543,17 +634,24 @@ async function processAttachmentForCurrentState(input: {
     ...((currentPayload.answers as Record<string, string> | undefined) ?? {}),
     ...extractedAnswers,
   }
+  const extractedOrigins = Object.fromEntries(
+    Object.keys(extractedAnswers).map((key) => [key, 'ocr' as OrigenCampo]),
+  )
 
+  // Explicitamos que salio del documento y que queda pendiente antes de
+  // empezar a preguntar, para que el usuario no sienta que repite datos.
+  const fields = await getFieldsByPrestacion(prestacion.id)
   await sendReply({
     conversationId: input.conversationId,
     to: input.telefono,
     channel: input.channel,
-    body: `Boleta analizada. ${extraction.resumen}`,
+    body: `Listo, analicé el documento. ${buildExtractionSummary(fields, mergedAnswers, Object.keys(extractedAnswers))}`,
     metadata: {
       attachmentId: attachmentRecord.id,
       attachmentRole,
       extraction,
       prestacionCodigo: prestacion.codigo,
+      camposExtraidos: Object.keys(extractedAnswers),
     },
   })
 
@@ -565,6 +663,7 @@ async function processAttachmentForCurrentState(input: {
     user: input.user,
     prestacion,
     answers: mergedAnswers,
+    answerOrigins: extractedOrigins,
     metadata: {
       attachmentId: attachmentRecord.id,
       attachmentRole,
@@ -702,6 +801,42 @@ async function askField(
     metadata: {
       stage: 'awaiting_field',
       campoKey: field.campo_key,
+    },
+  })
+}
+
+/**
+ * El usuario escribio texto cuando esperabamos el comprobante. Reiteramos la
+ * peticion sin perder el contexto de la prestacion ya elegida.
+ */
+async function remindDocumentPending(input: {
+  conversationId: number
+  telefono: string
+  channel?: CanalConversacion
+  state: EstadoConversacion
+}): Promise<void> {
+  const prestacion = input.state.prestacion_id
+    ? await getPrestacionById(input.state.prestacion_id)
+    : null
+
+  if (!prestacion) {
+    await sendReply({
+      conversationId: input.conversationId,
+      to: input.telefono,
+      channel: input.channel,
+      body: 'Perdí el contexto de la prestación. Escribe "menú" para empezar de nuevo.',
+    })
+    return
+  }
+
+  await sendReply({
+    conversationId: input.conversationId,
+    to: input.telefono,
+    channel: input.channel,
+    body: `Sigo esperando el documento para "${prestacion.nombre}". Adjunta una foto o PDF del comprobante, o escribe "menú" para cambiar de prestación.`,
+    metadata: {
+      stage: 'awaiting_document',
+      prestacionCodigo: prestacion.codigo,
     },
   })
 }
@@ -914,6 +1049,7 @@ async function handleFieldFlow(input: {
     user: input.user,
     prestacion,
     answers,
+    answerOrigins: { [field.campo_key]: 'usuario' },
   })
 }
 
@@ -951,13 +1087,15 @@ async function startConversationMenu(input: {
     payload: {},
     metadata: {},
   })
+  // El menu solo ofrece las prestaciones con flujo implementado, pero
+  // resolvePrestacion sigue reconociendo las bloqueadas para poder explicarlas.
   await sendPrestacionesMenu({
     conversationId: input.conversationId,
     telefono: input.telefono,
     channel: input.channel,
     user: input.user,
     isapreId: input.isapreId,
-    prestaciones,
+    prestaciones: prestaciones.filter(isPrestacionDisponible),
   })
 }
 
@@ -993,43 +1131,39 @@ async function handlePrestacionSelection(input: {
     return
   }
 
-  if (!prestacion.requiere_formulario) {
+  if (!isPrestacionDisponible(prestacion)) {
+    const disponibles = prestaciones.filter(isPrestacionDisponible)
     await upsertConversationState({
       conversacionId: input.conversationId,
       userId: input.user.id,
       isapreId: input.state.isapre_id,
       stage: 'awaiting_prestacion',
-      prestacionId: prestacion.id,
-      payload: {
-        selectedPrestacion: prestacion.codigo,
-      },
+      prestacionId: null,
+      payload: {},
       metadata: {},
     })
     await sendReply({
       conversationId: input.conversationId,
       to: input.telefono,
       channel: input.channel,
-      body: `La prestación "${prestacion.nombre}" fue detectada correctamente, pero en esta fase demo aún queda preparada para adjuntos y no para ejecución completa. Puedes escoger otra prestación o esperar la siguiente iteración.`,
+      body: `Identifiqué "${prestacion.nombre}", pero esa prestación todavía no está habilitada para tramitación automática. Por ahora puedo gestionar: ${disponibles.map((item) => item.nombre).join(' y ')}.`,
       metadata: {
         prestacionCodigo: prestacion.codigo,
+        prestacionBloqueada: true,
       },
     })
     return
   }
 
-  const fields = await getFieldsByPrestacion(prestacion.id)
-  const firstField = fields[0]
-  if (!firstField) {
-    throw new Error('La prestación seleccionada no tiene campos configurados')
-  }
-
+  // El comprobante va primero: de ahi sale la mayoria de los datos del formulario
+  // y solo preguntamos lo que el OCR no logre resolver.
   await upsertConversationState({
     conversacionId: input.conversationId,
     userId: input.user.id,
     isapreId: input.state.isapre_id,
-    stage: 'awaiting_field',
+    stage: 'awaiting_document',
     prestacionId: prestacion.id,
-    campoActualId: firstField.id,
+    campoActualId: null,
     payload: {
       selectedPrestacion: prestacion.codigo,
       answers: {},
@@ -1041,10 +1175,12 @@ async function handlePrestacionSelection(input: {
     conversationId: input.conversationId,
     to: input.telefono,
     channel: input.channel,
-    body: `Perfecto, comenzaremos con "${prestacion.nombre}". Te pediré los datos uno por uno.`,
-    metadata: { prestacionCodigo: prestacion.codigo },
+    body: buildDocumentRequest(prestacion),
+    metadata: {
+      stage: 'awaiting_document',
+      prestacionCodigo: prestacion.codigo,
+    },
   })
-  await askField(input.conversationId, input.telefono, firstField, input.channel)
 }
 
 export async function getConversationSnapshotByChannel(
@@ -1212,6 +1348,21 @@ export async function processWebConversationMessage(input: {
       user: usuario,
       selectedRaw: selectedPrestacion,
     })
+  } else if (attachments.length > 0) {
+    // Si llega un documento, manda el documento: de ahi sale la mayoria del
+    // formulario. El estado actual decide como se interpreta.
+    for (const attachment of attachments) {
+      const refreshedState = await getConversationState(conversacion.id) ?? ensuredState
+      await processAttachmentForCurrentState({
+        conversationId: conversacion.id,
+        telefono: usuario.telefono,
+        channel: 'web',
+        state: refreshedState,
+        user: usuario,
+        attachment,
+        declaredPrestacionCodigo: null,
+      })
+    }
   } else {
     switch (ensuredState.etapa) {
       case 'idle':
@@ -1236,6 +1387,14 @@ export async function processWebConversationMessage(input: {
           })
         }
         break
+      case 'awaiting_document':
+        await remindDocumentPending({
+          conversationId: conversacion.id,
+          telefono: usuario.telefono,
+          channel: 'web',
+          state: ensuredState,
+        })
+        break
       case 'awaiting_field':
         if (trimmedText) {
           await handleFieldFlow({
@@ -1254,19 +1413,6 @@ export async function processWebConversationMessage(input: {
       default:
         break
     }
-  }
-
-  for (const attachment of attachments) {
-    const refreshedState = await getConversationState(conversacion.id) ?? ensuredState
-    await processAttachmentForCurrentState({
-      conversationId: conversacion.id,
-      telefono: usuario.telefono,
-      channel: 'web',
-      state: refreshedState,
-      user: usuario,
-      attachment,
-      declaredPrestacionCodigo: selectedPrestacion || null,
-    })
   }
 }
 
@@ -1371,6 +1517,14 @@ export async function processKapsoInboundMessage(payload: KapsoWebhookPayload): 
         state: ensuredState,
         user: usuario,
         selectedRaw: normalizedInput,
+      })
+      return
+    case 'awaiting_document':
+      await remindDocumentPending({
+        conversationId: conversacion.id,
+        telefono: normalized.telefono,
+        channel: 'whatsapp',
+        state: ensuredState,
       })
       return
     case 'awaiting_field':

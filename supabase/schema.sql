@@ -70,12 +70,17 @@ begin
     create type public.etapa_conversacion as enum (
       'idle',
       'awaiting_prestacion',
+      'awaiting_document',
       'awaiting_field',
       'processing',
       'completed'
     );
   end if;
 end $$;
+
+-- Fuera del bloque anterior: alter type ... add value no puede ejecutarse
+-- dentro de una transaccion junto con el uso del nuevo valor.
+alter type public.etapa_conversacion add value if not exists 'awaiting_document';
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -394,40 +399,40 @@ values
     true,
     true,
     1,
-    '{"tipo_demo":"consultas_guiadas"}'::jsonb
+    '{"tipo_demo":"consultas_guiadas","disponible":true,"requiere_tipo_comprobante":true,"adjuntos":[{"role":"voucher","label":"Voucher o boleta principal","requerido":true},{"role":"detalle","label":"Detalle de prestación","requerido":false}]}'::jsonb
   ),
   (
     'banmedica',
     'examenes_y_otros',
     'Exámenes, Imagenología, Procedimientos y Otros',
-    'Prestación orientada a adjuntos; el demo la deja registrada como capa preparada.',
+    'Prestación sin formulario: sólo adjuntos. Aún no habilitada para ejecución automática.',
     false,
     true,
     true,
     2,
-    '{"tipo_demo":"adjuntos"}'::jsonb
+    '{"tipo_demo":"adjuntos","disponible":false,"adjuntos":[{"role":"boleta","label":"Boleta, factura o voucher","requerido":true},{"role":"orden_medica","label":"Orden médica","requerido":true},{"role":"detalle","label":"Detalle de prestación","requerido":true}]}'::jsonb
   ),
   (
     'banmedica',
     'urgencias_medicas',
     'Urgencias Médicas',
-    'Prestación con formulario guiado para el demo conversacional.',
+    'Prestación con formulario guiado y carga de boleta/voucher más detalle.',
     true,
     true,
     true,
     3,
-    '{"tipo_demo":"formulario"}'::jsonb
+    '{"tipo_demo":"formulario","disponible":true,"requiere_tipo_comprobante":false,"adjuntos":[{"role":"boleta","label":"Boleta o voucher","requerido":true},{"role":"detalle","label":"Detalle de prestación","requerido":false}]}'::jsonb
   ),
   (
     'banmedica',
     'optica_kine_fono',
     'Óptica, Kinesiología y Fonoaudiología',
-    'Prestación que hoy requiere adjuntos y queda preparada para fases siguientes.',
+    'Prestación con selección de comprobante previa. Aún no habilitada para ejecución automática.',
     false,
     true,
     true,
     4,
-    '{"tipo_demo":"adjuntos"}'::jsonb
+    '{"tipo_demo":"adjuntos","disponible":false,"requiere_tipo_comprobante":true,"adjuntos":[{"role":"boleta","label":"Boleta, factura o voucher","requerido":true},{"role":"detalle","label":"Detalle de prestación","requerido":false}]}'::jsonb
   )
 on conflict (isapre_id, codigo) do update set
   nombre = excluded.nombre,
@@ -474,34 +479,14 @@ cross join (
       '{"validacion":"rut"}'::jsonb
     ),
     (
-      'centro_medico_nombre',
-      'Nombre del centro médico',
-      'text',
-      'Ej: Clínica Santa María',
-      'Nombre visible en el comprobante o centro de urgencia.',
-      false,
-      2,
-      '{}'::jsonb
-    ),
-    (
       'fecha_atencion',
       'Fecha de atención',
       'date',
       'YYYY-MM-DD',
       'Fecha en que ocurrió la atención de urgencia.',
       true,
-      3,
+      2,
       '{"validacion":"date"}'::jsonb
-    ),
-    (
-      'monto_pagado',
-      'Monto pagado',
-      'number',
-      'Ej: 35000',
-      'Monto total pagado por la atención, sin puntos.',
-      false,
-      4,
-      '{"validacion":"number"}'::jsonb
     ),
     (
       'tipo_pago',
@@ -509,8 +494,8 @@ cross join (
       'select',
       'Ej: boleta o voucher',
       'Indica si el respaldo corresponde a boleta electrónica, factura o voucher.',
-      false,
-      5,
+      true,
+      3,
       '{"opciones":["boleta","factura","voucher"]}'::jsonb
     ),
     (
@@ -519,29 +504,19 @@ cross join (
       'text',
       'Ej: 7340991',
       'Número identificador del documento tributario o comprobante.',
-      false,
-      6,
+      true,
+      4,
       '{}'::jsonb
     ),
     (
-      'rut_profesional',
-      'RUT del profesional o prestador',
-      'rut',
-      'Ej: 18.466.194-2',
-      'RUT del médico o profesional indicado en la boleta, si aparece visible.',
-      false,
-      7,
-      '{"validacion":"rut"}'::jsonb
-    ),
-    (
-      'observaciones',
-      'Observaciones',
-      'text',
-      'Contexto adicional',
-      'Dato libre para complementar el registro del demo.',
-      false,
-      8,
-      '{}'::jsonb
+      'monto_pagado',
+      'Monto pagado',
+      'number',
+      'Ej: 35000',
+      'Monto total pagado por la atención, sin puntos.',
+      true,
+      5,
+      '{"validacion":"number"}'::jsonb
     )
 ) as data(campo_key, label, tipo, placeholder, ayuda, requerido, orden, metadata)
 where cp.isapre_id = 'banmedica'
@@ -555,6 +530,15 @@ on conflict (prestacion_id, campo_key) do update set
   orden = excluded.orden,
   metadata = excluded.metadata,
   updated_at = timezone('utc', now());
+
+-- Campos que existian en versiones previas del catalogo pero que no aparecen
+-- en la pantalla real de Urgencias Medicas. El upsert de arriba no los borra.
+delete from public.catalogo_campos_prestacion cc
+using public.catalogo_prestaciones cp
+where cc.prestacion_id = cp.id
+  and cp.isapre_id = 'banmedica'
+  and cp.codigo = 'urgencias_medicas'
+  and cc.campo_key in ('centro_medico_nombre', 'rut_profesional', 'observaciones');
 
 insert into public.catalogo_campos_prestacion (
   prestacion_id,

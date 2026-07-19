@@ -258,7 +258,9 @@ async function upsertProcesoField(
         selector = COALESCE(EXCLUDED.selector, proceso_campos.selector),
         requerido = EXCLUDED.requerido,
         valor_ingresado = COALESCE(EXCLUDED.valor_ingresado, proceso_campos.valor_ingresado),
-        metadata = EXCLUDED.metadata,
+        -- Fusion, no reemplazo: el scraper no conoce el 'origen' que fijo el
+        -- orquestador conversacional y lo borraria al redescubrir el campo.
+        metadata = proceso_campos.metadata || EXCLUDED.metadata,
         updated_at = timezone('utc', now())
     `,
     [
@@ -272,6 +274,50 @@ async function upsertProcesoField(
       JSON.stringify(field.metadata ?? {}),
     ],
   )
+}
+
+/**
+ * Resume lo que realmente ocurrio en el portal a partir de la bitacora, para
+ * que el historial diga si se completaron los campos, se subieron los adjuntos
+ * y hasta que etapa se llego.
+ */
+async function buildResumenEjecucion(procesoId: number): Promise<string> {
+  const stats = await queryOne<{
+    campos_ok: string
+    campos_fallidos: string
+    adjuntos_ok: string
+    adjuntos_faltantes: string
+    ultima_etapa: string | null
+  }>(
+    `
+      SELECT
+        COUNT(*) FILTER (WHERE accion = 'fill' OR accion = 'select') AS campos_ok,
+        COUNT(*) FILTER (WHERE accion IN ('fill_skip', 'select_skip')) AS campos_fallidos,
+        COUNT(*) FILTER (WHERE accion = 'upload') AS adjuntos_ok,
+        COUNT(*) FILTER (WHERE accion IN ('adjunto_requerido_faltante', 'upload_skip')) AS adjuntos_faltantes,
+        (
+          SELECT etapa FROM proceso_pasos
+          WHERE proceso_id = $1 ORDER BY orden DESC LIMIT 1
+        ) AS ultima_etapa
+      FROM proceso_pasos
+      WHERE proceso_id = $1
+    `,
+    [procesoId],
+  )
+
+  if (!stats) {
+    return 'Navegación Banmédica registrada sin envío final.'
+  }
+
+  const partes = [
+    `${stats.campos_ok} campo(s) completados en el portal`,
+    Number(stats.campos_fallidos) > 0 ? `${stats.campos_fallidos} sin ubicar` : null,
+    `${stats.adjuntos_ok} adjunto(s) subidos`,
+    Number(stats.adjuntos_faltantes) > 0 ? `${stats.adjuntos_faltantes} adjunto(s) faltantes` : null,
+    stats.ultima_etapa ? `última etapa: ${stats.ultima_etapa}` : null,
+  ].filter(Boolean)
+
+  return `${partes.join(', ')}. Detenido en el paso 3 sin envío final.`
 }
 
 /**
@@ -361,13 +407,13 @@ async function procesarProcesoDemo(task: ProcesoDemoTask): Promise<void> {
 
     if (result.success) {
       await updateProcesoDemoEstado(task.id, 'completado', {
-        resumen: `Proceso ${task.metadata?.prestacionNombre ?? 'demo'} completado. Navegación Banmédica registrada sin envío final.`,
+        resumen: `${task.metadata?.prestacionNombre ?? 'Demo'}: ${await buildResumenEjecucion(task.id)}`,
       })
       console.log(`✅ Demo #${task.id}: completado`)
     } else {
       await updateProcesoDemoEstado(task.id, 'fallido', {
         error: result.error ?? 'Error desconocido en el proceso demo',
-        resumen: 'Demo Banmedica fallido durante la navegacion automatizada',
+        resumen: `${task.metadata?.prestacionNombre ?? 'Demo'} fallido. ${await buildResumenEjecucion(task.id)}`,
       })
       console.log(`❌ Demo #${task.id}: ${result.error}`)
     }

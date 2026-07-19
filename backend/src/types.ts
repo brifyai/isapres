@@ -23,7 +23,13 @@ export type PortalStatus = 'operativo' | 'caido' | 'html_cambiado' | 'mantenimie
 export type EstadoProcesoDemo = 'pendiente' | 'en_progreso' | 'completado' | 'fallido'
 export type DireccionMensaje = 'entrante' | 'saliente' | 'sistema'
 export type TipoMensajeWhatsapp = 'text' | 'image' | 'interactive' | 'document' | 'audio' | 'system'
-export type EtapaConversacion = 'idle' | 'awaiting_prestacion' | 'awaiting_field' | 'processing' | 'completed'
+export type EtapaConversacion =
+  | 'idle'
+  | 'awaiting_prestacion'
+  | 'awaiting_document'
+  | 'awaiting_field'
+  | 'processing'
+  | 'completed'
 export type CanalConversacion = 'whatsapp' | 'web'
 
 export interface Usuario {
@@ -123,6 +129,16 @@ export interface ArchivoConversacion {
 }
 
 export type RolAdjuntoConversacion = 'voucher' | 'detalle' | 'orden_medica' | 'boleta' | 'otro'
+
+/** Origen del valor de un campo, para trazabilidad en el historial. */
+export type OrigenCampo = 'ocr' | 'usuario' | 'default'
+
+/** Slot de adjunto declarado en catalogo_prestaciones.metadata.adjuntos */
+export interface SlotAdjuntoPrestacion {
+  role: RolAdjuntoConversacion
+  label: string
+  requerido: boolean
+}
 
 export interface PrestacionCatalogo {
   id: number

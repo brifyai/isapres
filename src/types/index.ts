@@ -269,7 +269,13 @@ export interface DemoProcess {
 
 export interface ConversationState {
   id: string;
-  etapa: 'idle' | 'awaiting_prestacion' | 'awaiting_field' | 'processing' | 'completed';
+  etapa:
+    | 'idle'
+    | 'awaiting_prestacion'
+    | 'awaiting_document'
+    | 'awaiting_field'
+    | 'processing'
+    | 'completed';
   isapreId?: IsapreId;
   prestacionId?: string;
   campoActualId?: string;
@@ -309,6 +315,8 @@ export interface PrestacionDisponible {
   requiereAdjuntos: boolean;
   activa: boolean;
   orden: number;
+  /** false cuando el catálogo la declara sin flujo RPA implementado. */
+  disponible: boolean;
 }
 
 export interface ConversationSnapshot {

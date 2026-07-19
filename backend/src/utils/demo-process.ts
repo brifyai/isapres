@@ -6,6 +6,7 @@ import type {
   DireccionMensaje,
   IsapreId,
   MensajeWhatsapp,
+  OrigenCampo,
   PrestacionCampoCatalogo,
   ProcesoCampo,
   ProcesoDemo,
@@ -36,6 +37,8 @@ export interface CreatePrestacionProcessInput {
   requiereAdjuntos: boolean
   requiereFormulario: boolean
   answers: Record<string, string>
+  /** Origen de cada respuesta, para que el historial distinga OCR de dato pedido al usuario. */
+  answerOrigins?: Record<string, OrigenCampo>
   fieldDefinitions: Array<Pick<PrestacionCampoCatalogo, 'campo_key' | 'label' | 'tipo' | 'requerido'>>
   extraMetadata?: Record<string, unknown>
 }
@@ -435,6 +438,18 @@ export async function createPrestacionProcess(
     throw new Error('Ya existe un proceso activo para esta prestación')
   }
 
+  const origins = Object.values(input.answerOrigins ?? {})
+  const desdeOcr = origins.filter((origen) => origen === 'ocr').length
+  const desdeUsuario = origins.filter((origen) => origen === 'usuario').length
+  const adjuntos = Array.isArray(input.extraMetadata?.attachments)
+    ? (input.extraMetadata.attachments as unknown[]).length
+    : 0
+  const resumen = [
+    `Proceso ${input.prestacionNombre} en cola.`,
+    `${desdeOcr} campo(s) extraídos del documento, ${desdeUsuario} pedidos al usuario.`,
+    `${adjuntos} adjunto(s) disponibles para carga.`,
+  ].join(' ')
+
   const processId = await withTransaction(async (client) => {
     const inserted = await client.query<{ id: number }>(
       `
@@ -457,7 +472,7 @@ export async function createPrestacionProcess(
         input.isapreId,
         `${input.isapreId}_${input.prestacionCodigo}_demo`,
         input.origen,
-        `Proceso ${input.prestacionNombre} en cola para ejecución automatizada`,
+        resumen,
         JSON.stringify({
           prestacionCodigo: input.prestacionCodigo,
           prestacionNombre: input.prestacionNombre,
@@ -487,7 +502,7 @@ export async function createPrestacionProcess(
             valor_ingresado,
             metadata
           )
-          VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)
+          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
         `,
         [
           procesoId,
@@ -496,6 +511,9 @@ export async function createPrestacionProcess(
           field.tipo,
           field.requerido,
           input.answers[field.campo_key] ?? null,
+          JSON.stringify({
+            origen: input.answerOrigins?.[field.campo_key] ?? null,
+          }),
         ],
       )
     }
