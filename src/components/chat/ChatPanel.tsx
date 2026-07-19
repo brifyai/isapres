@@ -44,6 +44,9 @@ function getExtractedFields(message: ConversationMessage): string[] {
 export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
   const [text, setText] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  // Eco optimista: el OCR puede tardar varios segundos y sin esto el mensaje
+  // del usuario no aparece hasta que responde el backend.
+  const [pending, setPending] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const threadEndRef = useRef<HTMLDivElement>(null)
 
@@ -59,14 +62,21 @@ export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
 
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length])
+  }, [messages.length, pending])
 
-  const send = async (payload: WebConversationMessagePayload) => {
-    await onSend(payload)
+  const send = async (payload: WebConversationMessagePayload, echo?: string) => {
+    setPending(echo ?? payload.text ?? null)
+    // Limpiamos el composer de inmediato: el eco ya muestra lo enviado.
     setText('')
     setFile(null)
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
+    }
+
+    try {
+      await onSend(payload)
+    } finally {
+      setPending(null)
     }
   }
 
@@ -87,7 +97,8 @@ export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
         }]
       : undefined
 
-    await send({ text: text.trim() || undefined, attachments })
+    const echo = [text.trim(), file ? `📎 ${file.name}` : null].filter(Boolean).join('\n')
+    await send({ text: text.trim() || undefined, attachments }, echo)
   }
 
   return (
@@ -180,6 +191,35 @@ export function ChatPanel({ conversation, isSending, onSend }: ChatPanelProps) {
             </div>
           )
         })}
+        {pending && (
+          <div className="flex justify-end gap-2">
+            <div className="max-w-[80%] rounded-2xl bg-primary/60 px-4 py-2.5 text-primary-foreground">
+              <p className="whitespace-pre-wrap text-sm">{pending}</p>
+              <p className="mt-1.5 text-[11px] text-primary-foreground/70">Enviando…</p>
+            </div>
+            <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
+              <User className="h-4 w-4 text-primary" />
+            </div>
+          </div>
+        )}
+
+        {isSending && (
+          <div className="flex justify-start gap-2">
+            <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
+              <Bot className="h-4 w-4 text-primary" />
+            </div>
+            <div className="flex items-center gap-1 rounded-2xl bg-secondary px-4 py-3">
+              {[0, 150, 300].map((delay) => (
+                <span
+                  key={delay}
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/60"
+                  style={{ animationDelay: `${delay}ms` }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
         <div ref={threadEndRef} />
       </div>
 

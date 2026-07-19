@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   CalendarClock,
@@ -94,6 +94,7 @@ export function DashboardPage() {
   const [selectedProcess, setSelectedProcess] = useState<DemoProcess | null>(null)
   const [form, setForm] = useState<DemoBanmedicaPayload>(defaultDemoPayload)
   const [isLoading, setIsLoading] = useState(true)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSendingMessage, setIsSendingMessage] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,6 +104,13 @@ export function DashboardPage() {
     return ISAPRES.find((item) => item.id === id)?.nombre ?? 'Sin Isapre'
   }, [overview?.primaryIsapre])
 
+  // En una ref para que loadData lea la selección actual sin volver a crearse
+  // en cada cambio (lo que reiniciaría el efecto de carga).
+  const selectedProcessIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedProcessIdRef.current = selectedProcess?.id ?? null
+  }, [selectedProcess?.id])
+
   const loadProcessDetail = useCallback(async (processId: string) => {
     const response = await getDemoProcesoById(processId)
     if (response.success && response.data) {
@@ -110,8 +118,14 @@ export function DashboardPage() {
     }
   }, [])
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true)
+  // Los refetches en segundo plano no deben desmontar el dashboard: solo la
+  // primera carga muestra la pantalla completa.
+  const loadData = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
+    if (silent) {
+      setIsRefreshing(true)
+    } else {
+      setIsLoading(true)
+    }
     setError(null)
     try {
       const [overviewResponse, kpisResponse, reembolsosResponse, procesosResponse, conversationResponse] = await Promise.all([
@@ -133,9 +147,15 @@ export function DashboardPage() {
       }
       if (procesosResponse.success && procesosResponse.data) {
         setProcesos(procesosResponse.data)
-        const firstProcess = procesosResponse.data[0]
-        if (firstProcess) {
-          await loadProcessDetail(firstProcess.id)
+        // Respetamos el proceso que el usuario esté mirando; solo caemos al
+        // primero si no hay ninguno seleccionado o si el actual desapareció.
+        const seleccionadoId = selectedProcessIdRef.current
+        const sigueExistiendo = seleccionadoId
+          && procesosResponse.data.some((process) => process.id === seleccionadoId)
+        const objetivo = sigueExistiendo ? seleccionadoId : procesosResponse.data[0]?.id
+
+        if (objetivo) {
+          await loadProcessDetail(objetivo)
         } else {
           setSelectedProcess(null)
         }
@@ -147,6 +167,7 @@ export function DashboardPage() {
       setError(err instanceof Error ? err.message : 'No se pudo cargar el dashboard')
     } finally {
       setIsLoading(false)
+      setIsRefreshing(false)
     }
   }, [loadProcessDetail])
 
@@ -170,7 +191,7 @@ export function DashboardPage() {
         throw new Error(response.error ?? 'No se pudo crear el proceso demo')
       }
 
-      await loadData()
+      await loadData({ silent: true })
       await loadProcessDetail(response.data.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo crear el demo')
@@ -203,8 +224,10 @@ export function DashboardPage() {
         throw new Error(response.error ?? 'No se pudo procesar el mensaje web')
       }
 
+      // El snapshot ya viene en la respuesta del envío, así que el chat se
+      // actualiza al instante; el resto del dashboard se refresca en silencio.
       setConversation(response.data)
-      await loadData()
+      void loadData({ silent: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo enviar el mensaje web')
     } finally {
@@ -238,8 +261,12 @@ export function DashboardPage() {
           </div>
 
           <div className="flex flex-wrap gap-3">
-            <Button variant="secondary" onClick={() => void loadData()}>
-              <RefreshCw className="h-4 w-4" />
+            <Button
+              variant="secondary"
+              onClick={() => void loadData({ silent: true })}
+              disabled={isRefreshing}
+            >
+              <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
               Actualizar
             </Button>
             <Button
