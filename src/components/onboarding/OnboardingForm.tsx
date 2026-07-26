@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/Button'
 import { PrivacyBanner } from './PrivacyBanner'
 import { IsapreSelector } from './IsapreSelector'
 import { validateRut, formatRutInput } from '@/lib/rut'
-import { registerUser } from '@/services/api'
+import { registerUserDirect } from '@/services/registration'
 import { useAuth } from '@/context/AuthContext'
 import type { IsapreId, RegistroUsuarioPayload } from '@/types'
 
@@ -209,11 +209,10 @@ export function OnboardingForm({ telefonoInicial = '', onSuccess }: OnboardingFo
         },
       }
 
-      const response = await registerUser(payload)
+      const response = await registerUserDirect(payload)
 
       if (response.success && response.data) {
-        // Guardar sesión con el token JWT retornado por el backend
-        setSession(response.data.usuario, response.data.token)
+        setSession(response.data.usuario)
         setIsSuccess(true)
         onSuccess?.()
       } else {

@@ -7,15 +7,14 @@ import {
   type ReactNode,
 } from 'react'
 import type { Usuario } from '@/types'
-import { getCurrentUser } from '@/services/api'
 
-const TOKEN_KEY = 'wsp-isap-token'
+const SESSION_KEY = 'wsp-isap-session'
 
 interface AuthContextValue {
   usuario: Usuario | null
   isLoading: boolean
   isAuthenticated: boolean
-  setSession: (usuario: Usuario, token: string) => void
+  setSession: (usuario: Usuario, token?: string) => void
   logout: () => void
   refreshUser: () => Promise<void>
 }
@@ -26,31 +25,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [usuario, setUsuario] = useState<Usuario | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
-  const setSession = useCallback((user: Usuario, token: string) => {
-    localStorage.setItem(TOKEN_KEY, token)
+  const setSession = useCallback((user: Usuario) => {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user))
     setUsuario(user)
   }, [])
 
   const logout = useCallback(() => {
-    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(SESSION_KEY)
     setUsuario(null)
   }, [])
 
   const refreshUser = useCallback(async () => {
-    const token = localStorage.getItem(TOKEN_KEY)
-    if (!token) {
+    const rawSession = localStorage.getItem(SESSION_KEY)
+    if (!rawSession) {
+      setUsuario(null)
       setIsLoading(false)
       return
     }
+
     try {
-      const response = await getCurrentUser()
-      if (response.success && response.data) {
-        setUsuario(response.data)
-      } else {
-        localStorage.removeItem(TOKEN_KEY)
+      const parsed = JSON.parse(rawSession) as Usuario
+      if (!parsed?.id || !parsed?.telefono) {
+        throw new Error('Sesión inválida')
       }
+      setUsuario(parsed)
     } catch {
-      localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(SESSION_KEY)
+      setUsuario(null)
     } finally {
       setIsLoading(false)
     }
