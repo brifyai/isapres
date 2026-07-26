@@ -63,9 +63,17 @@ export async function registerUserDirect(
   })
 
   if (error) {
+    console.error('Supabase register_public_user error', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    })
     return {
       success: false,
-      error: normalizeDatabaseError(error.message),
+      error: normalizeDatabaseError(
+        [error.message, error.details, error.hint].filter(Boolean).join(' | '),
+      ),
     }
   }
 
