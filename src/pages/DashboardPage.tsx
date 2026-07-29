@@ -18,14 +18,14 @@ import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { buildWhatsappEntryUrl } from '@/lib/whatsapp'
 import { formatDate } from '@/lib/utils'
-import { syncBeneficiarios } from '@/services/beneficiarios'
+import { getBeneficiariosStatus, syncBeneficiarios } from '@/services/beneficiarios'
 import { ISAPRES } from '@/types'
 
 export function DashboardPage() {
   const { usuario, logout, setSession } = useAuth()
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
-  const [syncAction, setSyncAction] = useState<'sync' | 'verify' | 'resend' | null>(null)
+  const [syncAction, setSyncAction] = useState<'sync' | 'verify' | 'resend' | 'check' | null>(null)
   const [verificationCode, setVerificationCode] = useState('')
   const [verificationSessionId, setVerificationSessionId] = useState<string | null>(null)
   const [verificationMessage, setVerificationMessage] = useState<string | null>(null)
@@ -47,6 +47,7 @@ export function DashboardPage() {
   const isSyncingBeneficiarios = syncAction === 'sync'
   const isSubmittingVerification = syncAction === 'verify'
   const isResendingVerification = syncAction === 'resend'
+  const isCheckingBeneficiarios = syncAction === 'check'
 
   const resetVerificationState = () => {
     setVerificationCode('')
@@ -209,6 +210,40 @@ export function DashboardPage() {
     window.open(whatsappEntryUrl, '_blank', 'noopener,noreferrer')
   }
 
+  const handleCheckBeneficiarios = async () => {
+    if (!usuario) {
+      setError('No hay sesión activa para revisar beneficiarios.')
+      return
+    }
+
+    setSyncAction('check')
+    setError(null)
+    setSuccessMessage(null)
+
+    const response = await getBeneficiariosStatus({
+      id: usuario.id,
+      telefono: usuario.telefono,
+      rut: usuario.rut,
+    })
+
+    if (!response.success || !response.data) {
+      setError(response.error ?? 'No se pudo revisar el estado de beneficiarios.')
+      setSyncAction(null)
+      return
+    }
+
+    if (response.data.usuario) {
+      setSession(response.data.usuario)
+    }
+
+    setSuccessMessage(
+      response.data.hasBeneficiarios
+        ? 'Supabase ya tiene beneficiarios guardados. WhatsApp quedó habilitado.'
+        : 'Supabase aún no tiene beneficiarios guardados para este usuario.',
+    )
+    setSyncAction(null)
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-secondary/30 to-background">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6">
@@ -348,10 +383,19 @@ export function DashboardPage() {
               <Button
                 onClick={handleSyncBeneficiarios}
                 isLoading={isSyncingBeneficiarios}
-                disabled={!canSyncBeneficiarios || hasVerificationChallenge}
+                disabled={!canSyncBeneficiarios || hasVerificationChallenge || isCheckingBeneficiarios}
               >
                 <RefreshCw className="h-4 w-4" />
                 Sincronizar beneficiarios
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleCheckBeneficiarios}
+                isLoading={isCheckingBeneficiarios}
+                disabled={hasVerificationChallenge || isSyncingBeneficiarios}
+              >
+                <BadgeCheck className="h-4 w-4" />
+                Revisar beneficiarios guardados
               </Button>
               <Button
                 onClick={handleOpenWhatsapp}
