@@ -48,7 +48,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!parsed?.id || !parsed?.telefono) {
         throw new Error('Sesión inválida')
       }
-      setUsuario(parsed)
+      setUsuario({
+        ...parsed,
+        beneficiarios: parsed.beneficiarios ?? [],
+        beneficiariosUpdatedAt: parsed.beneficiariosUpdatedAt,
+      })
     } catch {
       localStorage.removeItem(SESSION_KEY)
       setUsuario(null)

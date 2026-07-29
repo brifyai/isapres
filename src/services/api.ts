@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance } from 'axios'
 import type {
   ApiResponse,
+  Beneficiario,
   ConversationAttachment,
   ConversationMessage,
   ConversationSnapshot,
@@ -63,6 +64,9 @@ interface RawUsuario {
   nombre: string
   telefono: string
   rut: string
+  beneficiarios?: Beneficiario[]
+  beneficiarios_updated_at?: string | null
+  beneficiariosUpdatedAt?: string | null
   created_at?: string
   updated_at?: string
   createdAt?: string
@@ -192,6 +196,8 @@ function mapUsuario(raw: RawUsuario): Usuario {
     telefono: raw.telefono,
     rut: raw.rut,
     credenciales: [],
+    beneficiarios: raw.beneficiarios ?? [],
+    beneficiariosUpdatedAt: raw.beneficiariosUpdatedAt ?? raw.beneficiarios_updated_at ?? undefined,
     createdAt: raw.created_at ?? raw.createdAt ?? new Date().toISOString(),
     updatedAt: raw.updated_at ?? raw.updatedAt ?? new Date().toISOString(),
   }

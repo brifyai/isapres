@@ -1,5 +1,5 @@
 import { getSupabaseClient } from './supabase'
-import type { ApiResponse, RegistroUsuarioPayload, Usuario } from '@/types'
+import type { ApiResponse, Beneficiario, RegistroUsuarioPayload, Usuario } from '@/types'
 
 interface RegistrationRow {
   id: number
@@ -8,6 +8,8 @@ interface RegistrationRow {
   rut: string
   isapre_id: Usuario['credenciales'][number]['isapreId']
   isapre_rut: string
+  beneficiarios?: Beneficiario[] | null
+  beneficiarios_updated_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -25,6 +27,8 @@ function mapRegistrationRow(row: RegistrationRow): Usuario {
         password: '',
       },
     ],
+    beneficiarios: row.beneficiarios ?? [],
+    beneficiariosUpdatedAt: row.beneficiarios_updated_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }

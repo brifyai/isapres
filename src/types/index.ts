@@ -126,6 +126,11 @@ export interface CredencialesIsapre {
   password: string;
 }
 
+export interface Beneficiario {
+  nombre: string;
+  rut: string;
+}
+
 /** Usuario enrolado desde WhatsApp. */
 export interface Usuario {
   id: string;
@@ -135,6 +140,8 @@ export interface Usuario {
   /** RUT con formato 12.345.678-K. */
   rut: string;
   credenciales: CredencialesIsapre[];
+  beneficiarios: Beneficiario[];
+  beneficiariosUpdatedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
