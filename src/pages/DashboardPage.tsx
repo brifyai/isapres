@@ -238,7 +238,7 @@ export function DashboardPage() {
 
     setSuccessMessage(
       response.data.hasBeneficiarios
-        ? 'Supabase ya tiene beneficiarios guardados. WhatsApp quedó habilitado.'
+        ? 'Ya tienes beneficiarios guardados. WhatsApp quedó habilitado.'
         : 'Aún no tienes beneficiarios guardados.',
     )
     setSyncAction(null)
