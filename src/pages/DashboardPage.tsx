@@ -239,7 +239,7 @@ export function DashboardPage() {
     setSuccessMessage(
       response.data.hasBeneficiarios
         ? 'Supabase ya tiene beneficiarios guardados. WhatsApp quedó habilitado.'
-        : 'Supabase aún no tiene beneficiarios guardados para este usuario.',
+        : 'Aún no tienes beneficiarios guardados.',
     )
     setSyncAction(null)
   }
@@ -381,12 +381,13 @@ export function DashboardPage() {
 
             <div className="mt-5 flex flex-wrap gap-3">
               <Button
+                variant="outline"
                 onClick={handleSyncBeneficiarios}
                 isLoading={isSyncingBeneficiarios}
-                disabled={!canSyncBeneficiarios || hasVerificationChallenge || isCheckingBeneficiarios}
+                disabled
               >
                 <RefreshCw className="h-4 w-4" />
-                Sincronizar beneficiarios
+                Próximamente
               </Button>
               <Button
                 variant="outline"
