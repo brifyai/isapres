@@ -509,7 +509,7 @@ export function DashboardPage() {
           </div>
         </section>
 
-        <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+        <section>
           <div className="rounded-2xl border bg-card p-6 shadow-sm">
             <div className="mb-4 flex items-center justify-between">
               <div>
@@ -535,14 +535,6 @@ export function DashboardPage() {
                 </div>
               ))}
             </div>
-          </div>
-
-          <div className="rounded-2xl border bg-card p-6 shadow-sm">
-            <Banner variant="info" title="Configuración MVP">
-              Esta versión usa una función serverless en Vercel con `SCRAPINGBEE_API_KEY`,
-              `SUPABASE_SERVICE_ROLE_KEY` y `EMAIL_ENCRYPTION_KEY`. El objetivo es validar
-              el flujo rápido; después lo podemos mover al RPA o backend definitivo.
-            </Banner>
           </div>
         </section>
       </div>
